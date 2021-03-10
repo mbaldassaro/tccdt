@@ -1,0 +1,2261 @@
+{
+ "cells": [
+  {
+   "cell_type": "markdown",
+   "metadata": {},
+   "source": [
+    "### Identifying Influential Information Sources in Communities of Facebook Groups"
+   ]
+  },
+  {
+   "cell_type": "markdown",
+   "metadata": {},
+   "source": [
+    "First, we'll import packages needed for script, add API token from the CrowdTangle dashboard you created, and add a database connection to store posts data we collect from sample groups"
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": 24,
+   "metadata": {},
+   "outputs": [],
+   "source": [
+    "import requests\n",
+    "import json\n",
+    "import pandas as pd\n",
+    "import collections\n",
+    "from datetime import datetime, timedelta \n",
+    "import time\n",
+    "import pyodbc \n",
+    "from sqlalchemy import create_engine\n",
+    "from urllib.parse import urlsplit #,urlparse, parse_qs \n",
+    "import networkx as nx\n",
+    "from networkx.algorithms import community\n",
+    "import matplotlib.pyplot as plt\n",
+    "\n",
+    "#crowdtangle token:\n",
+    "token = 'S3Bhx2kk4yZaiFKsW19PwlT04kW9azGHBPaI1g6s' #garunoff\n",
+    "#token = 'your_dashboard_token'\n",
+    "\n",
+    "#database connection:\n",
+    "connection_string = \"mssql+pyodbc://svradmin:+EnVgh2q-zxump9T@digitalthreats.database.windows.net:1433/garunoff?driver=ODBC+Driver+17+for+SQL+Server\"\n",
+    "#connection_string = 'your_database_connection_string'\n",
+    "engine = create_engine(connection_string, encoding='utf8')\n",
+    "db = engine.connect()"
+   ]
+  },
+  {
+   "cell_type": "markdown",
+   "metadata": {},
+   "source": [
+    "Then we will create a 'get_links' function (CrowdTangle Links API wrapper) to use to get last 1,000 post shares from a 'seed' page"
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": 3,
+   "metadata": {},
+   "outputs": [],
+   "source": [
+    "def get_links(token, link, platforms='facebook', count=1000):\n",
+    "    api_url_base = \"https://api.crowdtangle.com/links?token=\"\n",
+    "    link_pre = '&link='\n",
+    "    count_pre = '&count='\n",
+    "    plat_pre = '&platforms='\n",
+    "    api_url = format(f'{api_url_base}{token}{link_pre}{link}{plat_pre}{platforms}{count_pre}{count}')\n",
+    "    response = requests.get(api_url)   \n",
+    "    if response.status_code == 200:\n",
+    "        return json.loads(response.content.decode('utf-8'))\n",
+    "    else:\n",
+    "        return None"
+   ]
+  },
+  {
+   "cell_type": "markdown",
+   "metadata": {},
+   "source": [
+    "Then we pass the links to the 'seed' pages from which we want to grab last 1,000 post shares to the 'get_links' function. In this case, we'll just use one Facebook page for simplicity - the Facebook page of the Republican Party (facebook.com/GOP) - but you could easily use multiple pages (see: https://github.com/mbaldassaro/tccdt/blob/main/1.%20Sampling%20Facebook%20Pages%20%26%20Groups%20.ipynb)"
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": 4,
+   "metadata": {},
+   "outputs": [],
+   "source": [
+    "gop_snowball = get_links(token, link='facebook.com/GOP') #Republican Party "
+   ]
+  },
+  {
+   "cell_type": "markdown",
+   "metadata": {},
+   "source": [
+    "We'll take a quick peek at the names of some of the pages and groups that were drawn in our snowball sample because they have shared content from the Republican Party Facebook page (this step can be skipped, but it may be interesting!)"
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": 5,
+   "metadata": {},
+   "outputs": [
+    {
+     "data": {
+      "text/html": [
+       "<div>\n",
+       "<style scoped>\n",
+       "    .dataframe tbody tr th:only-of-type {\n",
+       "        vertical-align: middle;\n",
+       "    }\n",
+       "\n",
+       "    .dataframe tbody tr th {\n",
+       "        vertical-align: top;\n",
+       "    }\n",
+       "\n",
+       "    .dataframe thead th {\n",
+       "        text-align: right;\n",
+       "    }\n",
+       "</style>\n",
+       "<table border=\"1\" class=\"dataframe\">\n",
+       "  <thead>\n",
+       "    <tr style=\"text-align: right;\">\n",
+       "      <th></th>\n",
+       "      <th>name</th>\n",
+       "      <th>accountType</th>\n",
+       "      <th>shares</th>\n",
+       "    </tr>\n",
+       "  </thead>\n",
+       "  <tbody>\n",
+       "    <tr>\n",
+       "      <th>146</th>\n",
+       "      <td>GOP</td>\n",
+       "      <td>facebook_page</td>\n",
+       "      <td>80</td>\n",
+       "    </tr>\n",
+       "    <tr>\n",
+       "      <th>373</th>\n",
+       "      <td>Rowan County Kentucky Republicans</td>\n",
+       "      <td>facebook_page</td>\n",
+       "      <td>30</td>\n",
+       "    </tr>\n",
+       "    <tr>\n",
+       "      <th>160</th>\n",
+       "      <td>Goodhue County Republicans</td>\n",
+       "      <td>facebook_page</td>\n",
+       "      <td>22</td>\n",
+       "    </tr>\n",
+       "    <tr>\n",
+       "      <th>510</th>\n",
+       "      <td>Yellowstone County Republican Women</td>\n",
+       "      <td>facebook_group</td>\n",
+       "      <td>22</td>\n",
+       "    </tr>\n",
+       "    <tr>\n",
+       "      <th>463</th>\n",
+       "      <td>Trump Nation</td>\n",
+       "      <td>facebook_group</td>\n",
+       "      <td>16</td>\n",
+       "    </tr>\n",
+       "    <tr>\n",
+       "      <th>70</th>\n",
+       "      <td>Cherokee County Republican Women</td>\n",
+       "      <td>facebook_page</td>\n",
+       "      <td>14</td>\n",
+       "    </tr>\n",
+       "    <tr>\n",
+       "      <th>8</th>\n",
+       "      <td>9th District GOP of Georgia</td>\n",
+       "      <td>facebook_page</td>\n",
+       "      <td>14</td>\n",
+       "    </tr>\n",
+       "    <tr>\n",
+       "      <th>161</th>\n",
+       "      <td>Governor Kay Ivey Supporters</td>\n",
+       "      <td>facebook_group</td>\n",
+       "      <td>13</td>\n",
+       "    </tr>\n",
+       "    <tr>\n",
+       "      <th>507</th>\n",
+       "      <td>Worth County, Iowa GOP</td>\n",
+       "      <td>facebook_page</td>\n",
+       "      <td>11</td>\n",
+       "    </tr>\n",
+       "    <tr>\n",
+       "      <th>188</th>\n",
+       "      <td>Inyo County Republican Party</td>\n",
+       "      <td>facebook_page</td>\n",
+       "      <td>10</td>\n",
+       "    </tr>\n",
+       "  </tbody>\n",
+       "</table>\n",
+       "</div>"
+      ],
+      "text/plain": [
+       "                                    name     accountType  shares\n",
+       "146                                  GOP   facebook_page      80\n",
+       "373    Rowan County Kentucky Republicans   facebook_page      30\n",
+       "160           Goodhue County Republicans   facebook_page      22\n",
+       "510  Yellowstone County Republican Women  facebook_group      22\n",
+       "463                         Trump Nation  facebook_group      16\n",
+       "70      Cherokee County Republican Women   facebook_page      14\n",
+       "8            9th District GOP of Georgia   facebook_page      14\n",
+       "161         Governor Kay Ivey Supporters  facebook_group      13\n",
+       "507               Worth County, Iowa GOP   facebook_page      11\n",
+       "188         Inyo County Republican Party   facebook_page      10"
+      ]
+     },
+     "execution_count": 5,
+     "metadata": {},
+     "output_type": "execute_result"
+    }
+   ],
+   "source": [
+    "gop_snowball_sample = pd.DataFrame.from_dict(gop_snowball['result']['posts'])\n",
+    "gop_snowball_sample = pd.concat([gop_snowball_sample.drop(['account'], axis=1), gop_snowball_sample['account'].apply(pd.Series)], axis=1)\n",
+    "gop_snowball_sample.groupby(['name', 'accountType']).size().to_frame().reset_index().rename(columns={0: 'shares'}).sort_values(by='shares', ascending=False).head(10)"
+   ]
+  },
+  {
+   "cell_type": "markdown",
+   "metadata": {},
+   "source": [
+    "Looks like a pretty good snowball sample of Republican pages and groups!\n",
+    "\n",
+    "Next we create a 'prep_batch' function to prepare the pages and groups that have shared posts from these pages for batch upload to the CrowdTangle dashboard we created (be sure that you have created empty lists to store these pages and groups in your CrowdTangle dashboard!)"
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": 6,
+   "metadata": {},
+   "outputs": [],
+   "source": [
+    "def prep_batch(data, atype='pages', minsize=0, listname='null'):\n",
+    "    df = pd.DataFrame.from_dict(data['result']['posts'])\n",
+    "    df = pd.concat([df.drop(['account'], axis=1), df['account'].apply(pd.Series)], axis=1)\n",
+    "    df = df.groupby(['name', 'url', 'accountType']).size().to_frame().reset_index().sort_values(by=0, ascending=False)\n",
+    "    if atype == 'pages':\n",
+    "        df1 = df.loc[((df['accountType'] == 'facebook_page') & (df[0] > minsize))]\n",
+    "    else: #need to fix the else to set to 'groups' as an option -- not a big deal right now\n",
+    "        df1 = df.loc[((df['accountType'] == 'facebook_group') & (df[0] > minsize))]\n",
+    "    df1['List'] = listname\n",
+    "    df1 = df1.rename(columns={\"url\": \"Page or Account URL\"}).reset_index(drop=True)\n",
+    "    return df1[['Page or Account URL', 'List']] "
+   ]
+  },
+  {
+   "cell_type": "markdown",
+   "metadata": {},
+   "source": [
+    "Since we're looking to see who is influencing discussion in Facebook groups, we're only going to prep a batch of groups for upload to CrowdTangle"
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": 9,
+   "metadata": {},
+   "outputs": [],
+   "source": [
+    "gop_snowball_gp_batch = prep_batch(gop_snowball, atype='groups', minsize=1, listname='GOP Influencer Snowball Groups')"
+   ]
+  },
+  {
+   "cell_type": "markdown",
+   "metadata": {},
+   "source": [
+    "We'll export a CSV files for batch upload to CrowdTangle -- this will export one CSV file for batch upload."
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": 10,
+   "metadata": {},
+   "outputs": [],
+   "source": [
+    "gop_snowball_gp_batch.to_csv(\"gop_influencer_snowball_groups.csv\", index=False)"
+   ]
+  },
+  {
+   "cell_type": "markdown",
+   "metadata": {},
+   "source": [
+    "Once you have uploaded these pages and groups via batch upload to CrowdTangle, we can grab posts from the snowball sample. For this example, we'll grab the last 10,000 posts from the GOP Influencer Snowball Groups sample.\n",
+    "\n",
+    "We create a 'get_lists' function (CrowdTangle Lists API wrapper) to use to access all lists in the dashboard that have been created. Then we will grab the id of the list of sample groups from which you want to collect up to the last 10,000 posts."
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": 11,
+   "metadata": {},
+   "outputs": [
+    {
+     "data": {
+      "text/plain": [
+       "[{'id': 1490375, 'title': 'Republican Snowball Pages', 'type': 'LIST'},\n",
+       " {'id': 1490376, 'title': 'Republican Snowball Groups', 'type': 'LIST'},\n",
+       " {'id': 1490497, 'title': 'GA Republican Groups', 'type': 'LIST'},\n",
+       " {'id': 1500468, 'title': 'RNC Snowball', 'type': 'LIST'},\n",
+       " {'id': 1501381, 'title': 'Republican Community', 'type': 'LIST'},\n",
+       " {'id': 1504991, 'title': 'Republican Community Pages', 'type': 'LIST'},\n",
+       " {'id': 1519020, 'title': 'GOP Influencer Snowball Groups', 'type': 'LIST'}]"
+      ]
+     },
+     "execution_count": 11,
+     "metadata": {},
+     "output_type": "execute_result"
+    }
+   ],
+   "source": [
+    "def get_list_info():\n",
+    "    ctapi_list = 'https://api.crowdtangle.com/lists?token='\n",
+    "    api_url = format(f'{ctapi_list}{token}')\n",
+    "    response = requests.get(api_url)\n",
+    "    if response.status_code == 200:\n",
+    "        return json.loads(response.content.decode('utf-8'))\n",
+    "    else:\n",
+    "        return None\n",
+    "    \n",
+    "list_info = get_list_info()\n",
+    "list_info['result']['lists']"
+   ]
+  },
+  {
+   "cell_type": "markdown",
+   "metadata": {},
+   "source": [
+    "The list id for the GOP Influencer Snowball Groups sample we just created is '1519020'.\n",
+    "\n",
+    "We create a 'get_posts' function (CrowdTangle Posts API wrapper) to get up to last 10,000 posts from sample during date range provided.\n",
+    "\n",
+    "We'll set a custom date range even though we will only get the last 10,000 posts available. Since we're interested in looking at week over week changes in influencers, we'll set the date range for one week. "
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": 12,
+   "metadata": {},
+   "outputs": [],
+   "source": [
+    "idx = '1519020' #GOP Influencer Snowball Groups \n",
+    "start = '2021-03-02' #March 2 2021\n",
+    "end = '2021-03-09' #March 2021\n",
+    "allposts = []\n",
+    "def get_posts():\n",
+    "    ctapi_posts = 'https://api.crowdtangle.com/posts?token='\n",
+    "    start_date = '&startDate='\n",
+    "    end_date = '&endDate=' \n",
+    "    listids = '&listIds='\n",
+    "    count = '&count='\n",
+    "    n = '100'\n",
+    "    offset = '&offset='\n",
+    "    sortBy = '&sortBy='\n",
+    "    sort = 'total_interactions'\n",
+    "    api_url = format(f'{ctapi_posts}{token}{listids}{idx}{start_date}{start}{end_date}{end}{count}{n}{sortBy}{sort}{offset}')\n",
+    "    for o in range(0,10000,100):\n",
+    "        api_call = api_url + str(o)\n",
+    "        response = requests.get(api_call).json()\n",
+    "        time.sleep(10)\n",
+    "        allposts.append(response)\n",
+    "        print(api_call)\n",
+    "        \n",
+    "def posts_toframe(allposts):\n",
+    "    temp = pd.DataFrame(allposts)\n",
+    "    temp = pd.concat([temp.drop(['result'], axis=1), temp['result'].apply(pd.Series)], axis=1)\n",
+    "    temp = temp.explode('posts')\n",
+    "    temp = pd.concat([temp.drop(['posts'], axis=1), temp['posts'].apply(pd.Series)], axis=1)\n",
+    "    temp = temp.rename(columns={\"subscriberCount\": \"initialSubscriberCount\", \"id\": \"initialId\", \"platformId\": \"initialPlatformId\", \"platform\": \"initialPlatform\"})\n",
+    "#expand account data into individual columns\n",
+    "    temp = pd.concat([temp.drop(['account'], axis=1), temp['account'].apply(pd.Series)], axis=1)\n",
+    "#expand statistics data into invidivual columns\n",
+    "    temp = pd.concat([temp.drop(['statistics'], axis=1), temp['statistics'].apply(pd.Series)], axis=1)\n",
+    "    temp = pd.concat([temp.drop(['actual'], axis=1), temp['actual'].apply(pd.Series)], axis=1)\n",
+    "    temp['date'] = pd.to_datetime(temp.date)\n",
+    "    temp['updated'] = pd.to_datetime(temp.updated)\n",
+    "    temp['id'] = temp['id'].astype(object)\n",
+    "    temp = temp.drop(['status', 'pagination'], axis=1)\n",
+    "    return temp"
+   ]
+  },
+  {
+   "cell_type": "markdown",
+   "metadata": {},
+   "source": [
+    "Now we'll run the get_posts function to retrieve the last 10,000 posts. Note: to address API rate limits, the get_posts function takes 15+ minutes to run (now's a good time to brew another pot of coffee)."
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": 13,
+   "metadata": {},
+   "outputs": [
+    {
+     "name": "stdout",
+     "output_type": "stream",
+     "text": [
+      "https://api.crowdtangle.com/posts?token=S3Bhx2kk4yZaiFKsW19PwlT04kW9azGHBPaI1g6s&listIds=1519020&startDate=2021-03-02&endDate=2021-03-09&count=100&sortBy=total_interactions&offset=0\n",
+      "https://api.crowdtangle.com/posts?token=S3Bhx2kk4yZaiFKsW19PwlT04kW9azGHBPaI1g6s&listIds=1519020&startDate=2021-03-02&endDate=2021-03-09&count=100&sortBy=total_interactions&offset=100\n",
+      "https://api.crowdtangle.com/posts?token=S3Bhx2kk4yZaiFKsW19PwlT04kW9azGHBPaI1g6s&listIds=1519020&startDate=2021-03-02&endDate=2021-03-09&count=100&sortBy=total_interactions&offset=200\n",
+      "https://api.crowdtangle.com/posts?token=S3Bhx2kk4yZaiFKsW19PwlT04kW9azGHBPaI1g6s&listIds=1519020&startDate=2021-03-02&endDate=2021-03-09&count=100&sortBy=total_interactions&offset=300\n",
+      "https://api.crowdtangle.com/posts?token=S3Bhx2kk4yZaiFKsW19PwlT04kW9azGHBPaI1g6s&listIds=1519020&startDate=2021-03-02&endDate=2021-03-09&count=100&sortBy=total_interactions&offset=400\n",
+      "https://api.crowdtangle.com/posts?token=S3Bhx2kk4yZaiFKsW19PwlT04kW9azGHBPaI1g6s&listIds=1519020&startDate=2021-03-02&endDate=2021-03-09&count=100&sortBy=total_interactions&offset=500\n",
+      "https://api.crowdtangle.com/posts?token=S3Bhx2kk4yZaiFKsW19PwlT04kW9azGHBPaI1g6s&listIds=1519020&startDate=2021-03-02&endDate=2021-03-09&count=100&sortBy=total_interactions&offset=600\n",
+      "https://api.crowdtangle.com/posts?token=S3Bhx2kk4yZaiFKsW19PwlT04kW9azGHBPaI1g6s&listIds=1519020&startDate=2021-03-02&endDate=2021-03-09&count=100&sortBy=total_interactions&offset=700\n",
+      "https://api.crowdtangle.com/posts?token=S3Bhx2kk4yZaiFKsW19PwlT04kW9azGHBPaI1g6s&listIds=1519020&startDate=2021-03-02&endDate=2021-03-09&count=100&sortBy=total_interactions&offset=800\n",
+      "https://api.crowdtangle.com/posts?token=S3Bhx2kk4yZaiFKsW19PwlT04kW9azGHBPaI1g6s&listIds=1519020&startDate=2021-03-02&endDate=2021-03-09&count=100&sortBy=total_interactions&offset=900\n",
+      "https://api.crowdtangle.com/posts?token=S3Bhx2kk4yZaiFKsW19PwlT04kW9azGHBPaI1g6s&listIds=1519020&startDate=2021-03-02&endDate=2021-03-09&count=100&sortBy=total_interactions&offset=1000\n",
+      "https://api.crowdtangle.com/posts?token=S3Bhx2kk4yZaiFKsW19PwlT04kW9azGHBPaI1g6s&listIds=1519020&startDate=2021-03-02&endDate=2021-03-09&count=100&sortBy=total_interactions&offset=1100\n",
+      "https://api.crowdtangle.com/posts?token=S3Bhx2kk4yZaiFKsW19PwlT04kW9azGHBPaI1g6s&listIds=1519020&startDate=2021-03-02&endDate=2021-03-09&count=100&sortBy=total_interactions&offset=1200\n",
+      "https://api.crowdtangle.com/posts?token=S3Bhx2kk4yZaiFKsW19PwlT04kW9azGHBPaI1g6s&listIds=1519020&startDate=2021-03-02&endDate=2021-03-09&count=100&sortBy=total_interactions&offset=1300\n",
+      "https://api.crowdtangle.com/posts?token=S3Bhx2kk4yZaiFKsW19PwlT04kW9azGHBPaI1g6s&listIds=1519020&startDate=2021-03-02&endDate=2021-03-09&count=100&sortBy=total_interactions&offset=1400\n",
+      "https://api.crowdtangle.com/posts?token=S3Bhx2kk4yZaiFKsW19PwlT04kW9azGHBPaI1g6s&listIds=1519020&startDate=2021-03-02&endDate=2021-03-09&count=100&sortBy=total_interactions&offset=1500\n",
+      "https://api.crowdtangle.com/posts?token=S3Bhx2kk4yZaiFKsW19PwlT04kW9azGHBPaI1g6s&listIds=1519020&startDate=2021-03-02&endDate=2021-03-09&count=100&sortBy=total_interactions&offset=1600\n",
+      "https://api.crowdtangle.com/posts?token=S3Bhx2kk4yZaiFKsW19PwlT04kW9azGHBPaI1g6s&listIds=1519020&startDate=2021-03-02&endDate=2021-03-09&count=100&sortBy=total_interactions&offset=1700\n",
+      "https://api.crowdtangle.com/posts?token=S3Bhx2kk4yZaiFKsW19PwlT04kW9azGHBPaI1g6s&listIds=1519020&startDate=2021-03-02&endDate=2021-03-09&count=100&sortBy=total_interactions&offset=1800\n",
+      "https://api.crowdtangle.com/posts?token=S3Bhx2kk4yZaiFKsW19PwlT04kW9azGHBPaI1g6s&listIds=1519020&startDate=2021-03-02&endDate=2021-03-09&count=100&sortBy=total_interactions&offset=1900\n",
+      "https://api.crowdtangle.com/posts?token=S3Bhx2kk4yZaiFKsW19PwlT04kW9azGHBPaI1g6s&listIds=1519020&startDate=2021-03-02&endDate=2021-03-09&count=100&sortBy=total_interactions&offset=2000\n",
+      "https://api.crowdtangle.com/posts?token=S3Bhx2kk4yZaiFKsW19PwlT04kW9azGHBPaI1g6s&listIds=1519020&startDate=2021-03-02&endDate=2021-03-09&count=100&sortBy=total_interactions&offset=2100\n",
+      "https://api.crowdtangle.com/posts?token=S3Bhx2kk4yZaiFKsW19PwlT04kW9azGHBPaI1g6s&listIds=1519020&startDate=2021-03-02&endDate=2021-03-09&count=100&sortBy=total_interactions&offset=2200\n",
+      "https://api.crowdtangle.com/posts?token=S3Bhx2kk4yZaiFKsW19PwlT04kW9azGHBPaI1g6s&listIds=1519020&startDate=2021-03-02&endDate=2021-03-09&count=100&sortBy=total_interactions&offset=2300\n",
+      "https://api.crowdtangle.com/posts?token=S3Bhx2kk4yZaiFKsW19PwlT04kW9azGHBPaI1g6s&listIds=1519020&startDate=2021-03-02&endDate=2021-03-09&count=100&sortBy=total_interactions&offset=2400\n",
+      "https://api.crowdtangle.com/posts?token=S3Bhx2kk4yZaiFKsW19PwlT04kW9azGHBPaI1g6s&listIds=1519020&startDate=2021-03-02&endDate=2021-03-09&count=100&sortBy=total_interactions&offset=2500\n",
+      "https://api.crowdtangle.com/posts?token=S3Bhx2kk4yZaiFKsW19PwlT04kW9azGHBPaI1g6s&listIds=1519020&startDate=2021-03-02&endDate=2021-03-09&count=100&sortBy=total_interactions&offset=2600\n",
+      "https://api.crowdtangle.com/posts?token=S3Bhx2kk4yZaiFKsW19PwlT04kW9azGHBPaI1g6s&listIds=1519020&startDate=2021-03-02&endDate=2021-03-09&count=100&sortBy=total_interactions&offset=2700\n",
+      "https://api.crowdtangle.com/posts?token=S3Bhx2kk4yZaiFKsW19PwlT04kW9azGHBPaI1g6s&listIds=1519020&startDate=2021-03-02&endDate=2021-03-09&count=100&sortBy=total_interactions&offset=2800\n",
+      "https://api.crowdtangle.com/posts?token=S3Bhx2kk4yZaiFKsW19PwlT04kW9azGHBPaI1g6s&listIds=1519020&startDate=2021-03-02&endDate=2021-03-09&count=100&sortBy=total_interactions&offset=2900\n",
+      "https://api.crowdtangle.com/posts?token=S3Bhx2kk4yZaiFKsW19PwlT04kW9azGHBPaI1g6s&listIds=1519020&startDate=2021-03-02&endDate=2021-03-09&count=100&sortBy=total_interactions&offset=3000\n",
+      "https://api.crowdtangle.com/posts?token=S3Bhx2kk4yZaiFKsW19PwlT04kW9azGHBPaI1g6s&listIds=1519020&startDate=2021-03-02&endDate=2021-03-09&count=100&sortBy=total_interactions&offset=3100\n",
+      "https://api.crowdtangle.com/posts?token=S3Bhx2kk4yZaiFKsW19PwlT04kW9azGHBPaI1g6s&listIds=1519020&startDate=2021-03-02&endDate=2021-03-09&count=100&sortBy=total_interactions&offset=3200\n",
+      "https://api.crowdtangle.com/posts?token=S3Bhx2kk4yZaiFKsW19PwlT04kW9azGHBPaI1g6s&listIds=1519020&startDate=2021-03-02&endDate=2021-03-09&count=100&sortBy=total_interactions&offset=3300\n",
+      "https://api.crowdtangle.com/posts?token=S3Bhx2kk4yZaiFKsW19PwlT04kW9azGHBPaI1g6s&listIds=1519020&startDate=2021-03-02&endDate=2021-03-09&count=100&sortBy=total_interactions&offset=3400\n",
+      "https://api.crowdtangle.com/posts?token=S3Bhx2kk4yZaiFKsW19PwlT04kW9azGHBPaI1g6s&listIds=1519020&startDate=2021-03-02&endDate=2021-03-09&count=100&sortBy=total_interactions&offset=3500\n",
+      "https://api.crowdtangle.com/posts?token=S3Bhx2kk4yZaiFKsW19PwlT04kW9azGHBPaI1g6s&listIds=1519020&startDate=2021-03-02&endDate=2021-03-09&count=100&sortBy=total_interactions&offset=3600\n",
+      "https://api.crowdtangle.com/posts?token=S3Bhx2kk4yZaiFKsW19PwlT04kW9azGHBPaI1g6s&listIds=1519020&startDate=2021-03-02&endDate=2021-03-09&count=100&sortBy=total_interactions&offset=3700\n",
+      "https://api.crowdtangle.com/posts?token=S3Bhx2kk4yZaiFKsW19PwlT04kW9azGHBPaI1g6s&listIds=1519020&startDate=2021-03-02&endDate=2021-03-09&count=100&sortBy=total_interactions&offset=3800\n",
+      "https://api.crowdtangle.com/posts?token=S3Bhx2kk4yZaiFKsW19PwlT04kW9azGHBPaI1g6s&listIds=1519020&startDate=2021-03-02&endDate=2021-03-09&count=100&sortBy=total_interactions&offset=3900\n",
+      "https://api.crowdtangle.com/posts?token=S3Bhx2kk4yZaiFKsW19PwlT04kW9azGHBPaI1g6s&listIds=1519020&startDate=2021-03-02&endDate=2021-03-09&count=100&sortBy=total_interactions&offset=4000\n",
+      "https://api.crowdtangle.com/posts?token=S3Bhx2kk4yZaiFKsW19PwlT04kW9azGHBPaI1g6s&listIds=1519020&startDate=2021-03-02&endDate=2021-03-09&count=100&sortBy=total_interactions&offset=4100\n",
+      "https://api.crowdtangle.com/posts?token=S3Bhx2kk4yZaiFKsW19PwlT04kW9azGHBPaI1g6s&listIds=1519020&startDate=2021-03-02&endDate=2021-03-09&count=100&sortBy=total_interactions&offset=4200\n",
+      "https://api.crowdtangle.com/posts?token=S3Bhx2kk4yZaiFKsW19PwlT04kW9azGHBPaI1g6s&listIds=1519020&startDate=2021-03-02&endDate=2021-03-09&count=100&sortBy=total_interactions&offset=4300\n",
+      "https://api.crowdtangle.com/posts?token=S3Bhx2kk4yZaiFKsW19PwlT04kW9azGHBPaI1g6s&listIds=1519020&startDate=2021-03-02&endDate=2021-03-09&count=100&sortBy=total_interactions&offset=4400\n"
+     ]
+    },
+    {
+     "name": "stdout",
+     "output_type": "stream",
+     "text": [
+      "https://api.crowdtangle.com/posts?token=S3Bhx2kk4yZaiFKsW19PwlT04kW9azGHBPaI1g6s&listIds=1519020&startDate=2021-03-02&endDate=2021-03-09&count=100&sortBy=total_interactions&offset=4500\n",
+      "https://api.crowdtangle.com/posts?token=S3Bhx2kk4yZaiFKsW19PwlT04kW9azGHBPaI1g6s&listIds=1519020&startDate=2021-03-02&endDate=2021-03-09&count=100&sortBy=total_interactions&offset=4600\n",
+      "https://api.crowdtangle.com/posts?token=S3Bhx2kk4yZaiFKsW19PwlT04kW9azGHBPaI1g6s&listIds=1519020&startDate=2021-03-02&endDate=2021-03-09&count=100&sortBy=total_interactions&offset=4700\n",
+      "https://api.crowdtangle.com/posts?token=S3Bhx2kk4yZaiFKsW19PwlT04kW9azGHBPaI1g6s&listIds=1519020&startDate=2021-03-02&endDate=2021-03-09&count=100&sortBy=total_interactions&offset=4800\n",
+      "https://api.crowdtangle.com/posts?token=S3Bhx2kk4yZaiFKsW19PwlT04kW9azGHBPaI1g6s&listIds=1519020&startDate=2021-03-02&endDate=2021-03-09&count=100&sortBy=total_interactions&offset=4900\n",
+      "https://api.crowdtangle.com/posts?token=S3Bhx2kk4yZaiFKsW19PwlT04kW9azGHBPaI1g6s&listIds=1519020&startDate=2021-03-02&endDate=2021-03-09&count=100&sortBy=total_interactions&offset=5000\n",
+      "https://api.crowdtangle.com/posts?token=S3Bhx2kk4yZaiFKsW19PwlT04kW9azGHBPaI1g6s&listIds=1519020&startDate=2021-03-02&endDate=2021-03-09&count=100&sortBy=total_interactions&offset=5100\n",
+      "https://api.crowdtangle.com/posts?token=S3Bhx2kk4yZaiFKsW19PwlT04kW9azGHBPaI1g6s&listIds=1519020&startDate=2021-03-02&endDate=2021-03-09&count=100&sortBy=total_interactions&offset=5200\n",
+      "https://api.crowdtangle.com/posts?token=S3Bhx2kk4yZaiFKsW19PwlT04kW9azGHBPaI1g6s&listIds=1519020&startDate=2021-03-02&endDate=2021-03-09&count=100&sortBy=total_interactions&offset=5300\n",
+      "https://api.crowdtangle.com/posts?token=S3Bhx2kk4yZaiFKsW19PwlT04kW9azGHBPaI1g6s&listIds=1519020&startDate=2021-03-02&endDate=2021-03-09&count=100&sortBy=total_interactions&offset=5400\n",
+      "https://api.crowdtangle.com/posts?token=S3Bhx2kk4yZaiFKsW19PwlT04kW9azGHBPaI1g6s&listIds=1519020&startDate=2021-03-02&endDate=2021-03-09&count=100&sortBy=total_interactions&offset=5500\n",
+      "https://api.crowdtangle.com/posts?token=S3Bhx2kk4yZaiFKsW19PwlT04kW9azGHBPaI1g6s&listIds=1519020&startDate=2021-03-02&endDate=2021-03-09&count=100&sortBy=total_interactions&offset=5600\n",
+      "https://api.crowdtangle.com/posts?token=S3Bhx2kk4yZaiFKsW19PwlT04kW9azGHBPaI1g6s&listIds=1519020&startDate=2021-03-02&endDate=2021-03-09&count=100&sortBy=total_interactions&offset=5700\n",
+      "https://api.crowdtangle.com/posts?token=S3Bhx2kk4yZaiFKsW19PwlT04kW9azGHBPaI1g6s&listIds=1519020&startDate=2021-03-02&endDate=2021-03-09&count=100&sortBy=total_interactions&offset=5800\n",
+      "https://api.crowdtangle.com/posts?token=S3Bhx2kk4yZaiFKsW19PwlT04kW9azGHBPaI1g6s&listIds=1519020&startDate=2021-03-02&endDate=2021-03-09&count=100&sortBy=total_interactions&offset=5900\n",
+      "https://api.crowdtangle.com/posts?token=S3Bhx2kk4yZaiFKsW19PwlT04kW9azGHBPaI1g6s&listIds=1519020&startDate=2021-03-02&endDate=2021-03-09&count=100&sortBy=total_interactions&offset=6000\n",
+      "https://api.crowdtangle.com/posts?token=S3Bhx2kk4yZaiFKsW19PwlT04kW9azGHBPaI1g6s&listIds=1519020&startDate=2021-03-02&endDate=2021-03-09&count=100&sortBy=total_interactions&offset=6100\n",
+      "https://api.crowdtangle.com/posts?token=S3Bhx2kk4yZaiFKsW19PwlT04kW9azGHBPaI1g6s&listIds=1519020&startDate=2021-03-02&endDate=2021-03-09&count=100&sortBy=total_interactions&offset=6200\n",
+      "https://api.crowdtangle.com/posts?token=S3Bhx2kk4yZaiFKsW19PwlT04kW9azGHBPaI1g6s&listIds=1519020&startDate=2021-03-02&endDate=2021-03-09&count=100&sortBy=total_interactions&offset=6300\n",
+      "https://api.crowdtangle.com/posts?token=S3Bhx2kk4yZaiFKsW19PwlT04kW9azGHBPaI1g6s&listIds=1519020&startDate=2021-03-02&endDate=2021-03-09&count=100&sortBy=total_interactions&offset=6400\n",
+      "https://api.crowdtangle.com/posts?token=S3Bhx2kk4yZaiFKsW19PwlT04kW9azGHBPaI1g6s&listIds=1519020&startDate=2021-03-02&endDate=2021-03-09&count=100&sortBy=total_interactions&offset=6500\n",
+      "https://api.crowdtangle.com/posts?token=S3Bhx2kk4yZaiFKsW19PwlT04kW9azGHBPaI1g6s&listIds=1519020&startDate=2021-03-02&endDate=2021-03-09&count=100&sortBy=total_interactions&offset=6600\n",
+      "https://api.crowdtangle.com/posts?token=S3Bhx2kk4yZaiFKsW19PwlT04kW9azGHBPaI1g6s&listIds=1519020&startDate=2021-03-02&endDate=2021-03-09&count=100&sortBy=total_interactions&offset=6700\n",
+      "https://api.crowdtangle.com/posts?token=S3Bhx2kk4yZaiFKsW19PwlT04kW9azGHBPaI1g6s&listIds=1519020&startDate=2021-03-02&endDate=2021-03-09&count=100&sortBy=total_interactions&offset=6800\n",
+      "https://api.crowdtangle.com/posts?token=S3Bhx2kk4yZaiFKsW19PwlT04kW9azGHBPaI1g6s&listIds=1519020&startDate=2021-03-02&endDate=2021-03-09&count=100&sortBy=total_interactions&offset=6900\n",
+      "https://api.crowdtangle.com/posts?token=S3Bhx2kk4yZaiFKsW19PwlT04kW9azGHBPaI1g6s&listIds=1519020&startDate=2021-03-02&endDate=2021-03-09&count=100&sortBy=total_interactions&offset=7000\n",
+      "https://api.crowdtangle.com/posts?token=S3Bhx2kk4yZaiFKsW19PwlT04kW9azGHBPaI1g6s&listIds=1519020&startDate=2021-03-02&endDate=2021-03-09&count=100&sortBy=total_interactions&offset=7100\n",
+      "https://api.crowdtangle.com/posts?token=S3Bhx2kk4yZaiFKsW19PwlT04kW9azGHBPaI1g6s&listIds=1519020&startDate=2021-03-02&endDate=2021-03-09&count=100&sortBy=total_interactions&offset=7200\n",
+      "https://api.crowdtangle.com/posts?token=S3Bhx2kk4yZaiFKsW19PwlT04kW9azGHBPaI1g6s&listIds=1519020&startDate=2021-03-02&endDate=2021-03-09&count=100&sortBy=total_interactions&offset=7300\n",
+      "https://api.crowdtangle.com/posts?token=S3Bhx2kk4yZaiFKsW19PwlT04kW9azGHBPaI1g6s&listIds=1519020&startDate=2021-03-02&endDate=2021-03-09&count=100&sortBy=total_interactions&offset=7400\n",
+      "https://api.crowdtangle.com/posts?token=S3Bhx2kk4yZaiFKsW19PwlT04kW9azGHBPaI1g6s&listIds=1519020&startDate=2021-03-02&endDate=2021-03-09&count=100&sortBy=total_interactions&offset=7500\n",
+      "https://api.crowdtangle.com/posts?token=S3Bhx2kk4yZaiFKsW19PwlT04kW9azGHBPaI1g6s&listIds=1519020&startDate=2021-03-02&endDate=2021-03-09&count=100&sortBy=total_interactions&offset=7600\n",
+      "https://api.crowdtangle.com/posts?token=S3Bhx2kk4yZaiFKsW19PwlT04kW9azGHBPaI1g6s&listIds=1519020&startDate=2021-03-02&endDate=2021-03-09&count=100&sortBy=total_interactions&offset=7700\n",
+      "https://api.crowdtangle.com/posts?token=S3Bhx2kk4yZaiFKsW19PwlT04kW9azGHBPaI1g6s&listIds=1519020&startDate=2021-03-02&endDate=2021-03-09&count=100&sortBy=total_interactions&offset=7800\n",
+      "https://api.crowdtangle.com/posts?token=S3Bhx2kk4yZaiFKsW19PwlT04kW9azGHBPaI1g6s&listIds=1519020&startDate=2021-03-02&endDate=2021-03-09&count=100&sortBy=total_interactions&offset=7900\n",
+      "https://api.crowdtangle.com/posts?token=S3Bhx2kk4yZaiFKsW19PwlT04kW9azGHBPaI1g6s&listIds=1519020&startDate=2021-03-02&endDate=2021-03-09&count=100&sortBy=total_interactions&offset=8000\n",
+      "https://api.crowdtangle.com/posts?token=S3Bhx2kk4yZaiFKsW19PwlT04kW9azGHBPaI1g6s&listIds=1519020&startDate=2021-03-02&endDate=2021-03-09&count=100&sortBy=total_interactions&offset=8100\n",
+      "https://api.crowdtangle.com/posts?token=S3Bhx2kk4yZaiFKsW19PwlT04kW9azGHBPaI1g6s&listIds=1519020&startDate=2021-03-02&endDate=2021-03-09&count=100&sortBy=total_interactions&offset=8200\n",
+      "https://api.crowdtangle.com/posts?token=S3Bhx2kk4yZaiFKsW19PwlT04kW9azGHBPaI1g6s&listIds=1519020&startDate=2021-03-02&endDate=2021-03-09&count=100&sortBy=total_interactions&offset=8300\n",
+      "https://api.crowdtangle.com/posts?token=S3Bhx2kk4yZaiFKsW19PwlT04kW9azGHBPaI1g6s&listIds=1519020&startDate=2021-03-02&endDate=2021-03-09&count=100&sortBy=total_interactions&offset=8400\n",
+      "https://api.crowdtangle.com/posts?token=S3Bhx2kk4yZaiFKsW19PwlT04kW9azGHBPaI1g6s&listIds=1519020&startDate=2021-03-02&endDate=2021-03-09&count=100&sortBy=total_interactions&offset=8500\n",
+      "https://api.crowdtangle.com/posts?token=S3Bhx2kk4yZaiFKsW19PwlT04kW9azGHBPaI1g6s&listIds=1519020&startDate=2021-03-02&endDate=2021-03-09&count=100&sortBy=total_interactions&offset=8600\n",
+      "https://api.crowdtangle.com/posts?token=S3Bhx2kk4yZaiFKsW19PwlT04kW9azGHBPaI1g6s&listIds=1519020&startDate=2021-03-02&endDate=2021-03-09&count=100&sortBy=total_interactions&offset=8700\n",
+      "https://api.crowdtangle.com/posts?token=S3Bhx2kk4yZaiFKsW19PwlT04kW9azGHBPaI1g6s&listIds=1519020&startDate=2021-03-02&endDate=2021-03-09&count=100&sortBy=total_interactions&offset=8800\n",
+      "https://api.crowdtangle.com/posts?token=S3Bhx2kk4yZaiFKsW19PwlT04kW9azGHBPaI1g6s&listIds=1519020&startDate=2021-03-02&endDate=2021-03-09&count=100&sortBy=total_interactions&offset=8900\n"
+     ]
+    },
+    {
+     "name": "stdout",
+     "output_type": "stream",
+     "text": [
+      "https://api.crowdtangle.com/posts?token=S3Bhx2kk4yZaiFKsW19PwlT04kW9azGHBPaI1g6s&listIds=1519020&startDate=2021-03-02&endDate=2021-03-09&count=100&sortBy=total_interactions&offset=9000\n",
+      "https://api.crowdtangle.com/posts?token=S3Bhx2kk4yZaiFKsW19PwlT04kW9azGHBPaI1g6s&listIds=1519020&startDate=2021-03-02&endDate=2021-03-09&count=100&sortBy=total_interactions&offset=9100\n",
+      "https://api.crowdtangle.com/posts?token=S3Bhx2kk4yZaiFKsW19PwlT04kW9azGHBPaI1g6s&listIds=1519020&startDate=2021-03-02&endDate=2021-03-09&count=100&sortBy=total_interactions&offset=9200\n",
+      "https://api.crowdtangle.com/posts?token=S3Bhx2kk4yZaiFKsW19PwlT04kW9azGHBPaI1g6s&listIds=1519020&startDate=2021-03-02&endDate=2021-03-09&count=100&sortBy=total_interactions&offset=9300\n",
+      "https://api.crowdtangle.com/posts?token=S3Bhx2kk4yZaiFKsW19PwlT04kW9azGHBPaI1g6s&listIds=1519020&startDate=2021-03-02&endDate=2021-03-09&count=100&sortBy=total_interactions&offset=9400\n",
+      "https://api.crowdtangle.com/posts?token=S3Bhx2kk4yZaiFKsW19PwlT04kW9azGHBPaI1g6s&listIds=1519020&startDate=2021-03-02&endDate=2021-03-09&count=100&sortBy=total_interactions&offset=9500\n",
+      "https://api.crowdtangle.com/posts?token=S3Bhx2kk4yZaiFKsW19PwlT04kW9azGHBPaI1g6s&listIds=1519020&startDate=2021-03-02&endDate=2021-03-09&count=100&sortBy=total_interactions&offset=9600\n",
+      "https://api.crowdtangle.com/posts?token=S3Bhx2kk4yZaiFKsW19PwlT04kW9azGHBPaI1g6s&listIds=1519020&startDate=2021-03-02&endDate=2021-03-09&count=100&sortBy=total_interactions&offset=9700\n",
+      "https://api.crowdtangle.com/posts?token=S3Bhx2kk4yZaiFKsW19PwlT04kW9azGHBPaI1g6s&listIds=1519020&startDate=2021-03-02&endDate=2021-03-09&count=100&sortBy=total_interactions&offset=9800\n",
+      "https://api.crowdtangle.com/posts?token=S3Bhx2kk4yZaiFKsW19PwlT04kW9azGHBPaI1g6s&listIds=1519020&startDate=2021-03-02&endDate=2021-03-09&count=100&sortBy=total_interactions&offset=9900\n"
+     ]
+    }
+   ],
+   "source": [
+    "get_posts() "
+   ]
+  },
+  {
+   "cell_type": "markdown",
+   "metadata": {},
+   "source": [
+    "We'll convert the data we just obtained to a dataframe... "
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": 19,
+   "metadata": {},
+   "outputs": [],
+   "source": [
+    "gop_snowball_group_posts = posts_toframe(allposts)"
+   ]
+  },
+  {
+   "cell_type": "markdown",
+   "metadata": {},
+   "source": [
+    "...and take a peek at the links from Facebook that we will be working with soon to extract data about influencers. "
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": 21,
+   "metadata": {},
+   "outputs": [
+    {
+     "data": {
+      "text/html": [
+       "<div>\n",
+       "<style scoped>\n",
+       "    .dataframe tbody tr th:only-of-type {\n",
+       "        vertical-align: middle;\n",
+       "    }\n",
+       "\n",
+       "    .dataframe tbody tr th {\n",
+       "        vertical-align: top;\n",
+       "    }\n",
+       "\n",
+       "    .dataframe thead th {\n",
+       "        text-align: right;\n",
+       "    }\n",
+       "</style>\n",
+       "<table border=\"1\" class=\"dataframe\">\n",
+       "  <thead>\n",
+       "    <tr style=\"text-align: right;\">\n",
+       "      <th></th>\n",
+       "      <th>link</th>\n",
+       "    </tr>\n",
+       "  </thead>\n",
+       "  <tbody>\n",
+       "    <tr>\n",
+       "      <th>57</th>\n",
+       "      <td>https://www.facebook.com/photo.php?fbid=295706...</td>\n",
+       "    </tr>\n",
+       "    <tr>\n",
+       "      <th>34</th>\n",
+       "      <td>https://www.facebook.com/youngamericasfoundati...</td>\n",
+       "    </tr>\n",
+       "    <tr>\n",
+       "      <th>38</th>\n",
+       "      <td>https://www.facebook.com/GOP/videos/2915113123...</td>\n",
+       "    </tr>\n",
+       "    <tr>\n",
+       "      <th>40</th>\n",
+       "      <td>https://www.facebook.com/drandras.aradszki/pho...</td>\n",
+       "    </tr>\n",
+       "    <tr>\n",
+       "      <th>29</th>\n",
+       "      <td>https://www.facebook.com/turningpointusa/photo...</td>\n",
+       "    </tr>\n",
+       "    <tr>\n",
+       "      <th>50</th>\n",
+       "      <td>https://www.facebook.com/cpsnewsnetwork/videos...</td>\n",
+       "    </tr>\n",
+       "    <tr>\n",
+       "      <th>26</th>\n",
+       "      <td>https://www.facebook.com/photo.php?fbid=367599...</td>\n",
+       "    </tr>\n",
+       "    <tr>\n",
+       "      <th>31</th>\n",
+       "      <td>https://www.facebook.com/photo.php?fbid=368454...</td>\n",
+       "    </tr>\n",
+       "    <tr>\n",
+       "      <th>32</th>\n",
+       "      <td>https://www.facebook.com/PatriotPost/photos/a....</td>\n",
+       "    </tr>\n",
+       "    <tr>\n",
+       "      <th>78</th>\n",
+       "      <td>https://www.facebook.com/reportingfrommybasket...</td>\n",
+       "    </tr>\n",
+       "    <tr>\n",
+       "      <th>9</th>\n",
+       "      <td>https://www.facebook.com/photo.php?fbid=403243...</td>\n",
+       "    </tr>\n",
+       "    <tr>\n",
+       "      <th>78</th>\n",
+       "      <td>https://www.facebook.com/2821064631368309/vide...</td>\n",
+       "    </tr>\n",
+       "    <tr>\n",
+       "      <th>24</th>\n",
+       "      <td>https://www.facebook.com/themarkkaye/videos/25...</td>\n",
+       "    </tr>\n",
+       "    <tr>\n",
+       "      <th>58</th>\n",
+       "      <td>https://www.facebook.com/photo.php?fbid=102252...</td>\n",
+       "    </tr>\n",
+       "    <tr>\n",
+       "      <th>57</th>\n",
+       "      <td>https://www.facebook.com/photo.php?fbid=407383...</td>\n",
+       "    </tr>\n",
+       "    <tr>\n",
+       "      <th>48</th>\n",
+       "      <td>https://www.facebook.com/todayscatholicsaints/...</td>\n",
+       "    </tr>\n",
+       "    <tr>\n",
+       "      <th>29</th>\n",
+       "      <td>https://www.facebook.com/photo.php?fbid=102202...</td>\n",
+       "    </tr>\n",
+       "    <tr>\n",
+       "      <th>0</th>\n",
+       "      <td>https://www.facebook.com/313836475296127/photo...</td>\n",
+       "    </tr>\n",
+       "    <tr>\n",
+       "      <th>60</th>\n",
+       "      <td>https://www.facebook.com/EstamosUnidos21/photo...</td>\n",
+       "    </tr>\n",
+       "    <tr>\n",
+       "      <th>45</th>\n",
+       "      <td>https://www.facebook.com/photo.php?fbid=847784...</td>\n",
+       "    </tr>\n",
+       "  </tbody>\n",
+       "</table>\n",
+       "</div>"
+      ],
+      "text/plain": [
+       "                                                 link\n",
+       "57  https://www.facebook.com/photo.php?fbid=295706...\n",
+       "34  https://www.facebook.com/youngamericasfoundati...\n",
+       "38  https://www.facebook.com/GOP/videos/2915113123...\n",
+       "40  https://www.facebook.com/drandras.aradszki/pho...\n",
+       "29  https://www.facebook.com/turningpointusa/photo...\n",
+       "50  https://www.facebook.com/cpsnewsnetwork/videos...\n",
+       "26  https://www.facebook.com/photo.php?fbid=367599...\n",
+       "31  https://www.facebook.com/photo.php?fbid=368454...\n",
+       "32  https://www.facebook.com/PatriotPost/photos/a....\n",
+       "78  https://www.facebook.com/reportingfrommybasket...\n",
+       "9   https://www.facebook.com/photo.php?fbid=403243...\n",
+       "78  https://www.facebook.com/2821064631368309/vide...\n",
+       "24  https://www.facebook.com/themarkkaye/videos/25...\n",
+       "58  https://www.facebook.com/photo.php?fbid=102252...\n",
+       "57  https://www.facebook.com/photo.php?fbid=407383...\n",
+       "48  https://www.facebook.com/todayscatholicsaints/...\n",
+       "29  https://www.facebook.com/photo.php?fbid=102202...\n",
+       "0   https://www.facebook.com/313836475296127/photo...\n",
+       "60  https://www.facebook.com/EstamosUnidos21/photo...\n",
+       "45  https://www.facebook.com/photo.php?fbid=847784..."
+      ]
+     },
+     "execution_count": 21,
+     "metadata": {},
+     "output_type": "execute_result"
+    }
+   ],
+   "source": [
+    "gop_snowball_links = gop_snowball_group_posts[['link']][gop_snowball_group_posts['link'].notnull()]\n",
+    "gop_snowball_links[gop_snowball_links['link'].str.contains(r\"facebook.com\")].sample(n=20, random_state=1)"
+   ]
+  },
+  {
+   "cell_type": "markdown",
+   "metadata": {},
+   "source": [
+    "Then we'll prepare it for storage... "
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": 22,
+   "metadata": {},
+   "outputs": [],
+   "source": [
+    "gop_snowball_group_posts = gop_snowball_group_posts.drop([0], axis=1) #removes all columns with name '0'\n",
+    "gop_snowball_group_posts = gop_snowball_group_posts.drop(['expandedLinks', 'media', 'expected'], axis=1) #removes columns which have list objects as values"
+   ]
+  },
+  {
+   "cell_type": "markdown",
+   "metadata": {},
+   "source": [
+    "...and upload to our database (NB: we don't want to lose this data and have to wait 15+ minutes for get_posts() line to run again)."
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": 25,
+   "metadata": {},
+   "outputs": [],
+   "source": [
+    "gop_snowball_group_posts.to_sql(\"gop_groups_snowball_posts\", db, if_exists='replace', schema=None, index=False, chunksize=500)"
+   ]
+  },
+  {
+   "cell_type": "markdown",
+   "metadata": {},
+   "source": [
+    "Now we'll use social network analysis and community detection methods to identify our community of Facebook groups of interest for the purposes of evaluating who is influential in that particular community.\n",
+    "\n",
+    "First, we'll create a function called 'prep_sna_group' to pre-process our data for Social Network Analysis.\n",
+    "\n",
+    "This script specifically uses the Facebook assigned 'platformId' of the group as the 'target' and the handle of the 'source' of posted content to the group -- this may be content that was shared from a public Facebook page or from an inidivual Facebook account, i.e. a private Facebook user. By extracting 'sources' and 'targets', we will be able to map the degree to which groups are targeted with common sources of information.\n",
+    "\n",
+    "NB: The source handle - which is either a text string from the URL of a public Facebook page (e.g. joeSmith) or a numeric identifier (e.g. 987654) of a Facebook user. It is contained in the link variable and must be parsed using url splitting techniques."
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": 26,
+   "metadata": {},
+   "outputs": [],
+   "source": [
+    "def prep_sna_group(data):\n",
+    "    #subset just key columns\n",
+    "    data_sub = data[['name', 'url', 'platformId', 'subscriberCount', 'link']]\n",
+    "    #remove rows where there is no link  value\n",
+    "    data_sub = data_sub[pd.notnull(data_sub['link'])]\n",
+    "    #remove rows where link contains 'photo.php' - there is no user id handle in those links\n",
+    "    data_sub = data_sub[~data_sub['link'].str.contains(r\"photo.php\")]\n",
+    "    #find + remove '/groups' in link\n",
+    "    data_sub['link'] = data_sub['link'].replace(to_replace=r\"/groups\", value='', regex=True)\n",
+    "    #find + remove '/photos' in link\n",
+    "    data_sub['link'] = data_sub['link'].replace(to_replace=r\"/photos\", value='', regex=True)\n",
+    "    #find + remove \"?\" in link \n",
+    "    data_sub['link'] = data_sub['link'].replace(to_replace=r\"\\?\", value='', regex=True)\n",
+    "    #find + remove \"fbid=\" in link \n",
+    "    data_sub['link'] = data_sub['link'].replace(to_replace=r\"fbid=\", value='', regex=True)\n",
+    "    #find + remove '&\" + everything afterwards in link \n",
+    "    data_sub['link'] = data_sub['link'].replace(to_replace=r\"\\&.*\", value='/', regex=True)\n",
+    "    #parse cleaned up link url to separate components into different columns\n",
+    "    data_sub['protocol2'], data_sub['domain2'], data_sub['path2'], data_sub['query2'], data_sub['fragment2'] = zip(*[urlsplit(i) for i in data_sub['link']])\n",
+    "    #keep only rows where domain is facebook.com\n",
+    "    data_sub = data_sub[data_sub['domain2'] == 'www.facebook.com']\n",
+    "    #change Facebook Id value to 'target' (this is id of the group where post was shared)\n",
+    "    data_sub['target'] = data_sub['platformId']\n",
+    "    #change path2 value to 'source' (this is the id of the user that targeted the group)\n",
+    "    data_sub['source'] = data_sub['path2'].str.extract(r'/\\s*([^\\/]*)\\s*\\/', expand=False)\n",
+    "    #add column 'group' that is the same as 'Group Name'. in some functions, space btwn Group and Name causes probs\n",
+    "    data_sub['group'] = data_sub['name']\n",
+    "    #remove any rows where 'source' is null -- probably caused by  find + remove error...to be examined \n",
+    "    data_sub = data_sub[pd.notnull(data_sub['source'])].reset_index(drop=True)\n",
+    "    #return the final cleaned table\n",
+    "    return data_sub"
+   ]
+  },
+  {
+   "cell_type": "markdown",
+   "metadata": {},
+   "source": [
+    "We pass the posts data to our prep_sna_group function to obtain the 'targets' (groups) and 'sources'"
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": 28,
+   "metadata": {},
+   "outputs": [],
+   "source": [
+    "gop_groups_pairs = prep_sna_group(gop_snowball_group_posts) "
+   ]
+  },
+  {
+   "cell_type": "markdown",
+   "metadata": {},
+   "source": [
+    "We subset the data to get just three columns of interest: name, target and source. The name is the group (name) which corresponds to the target, which is merely a numerical identifier. Extracting the name of the group is useful for adding labels to our SNA graph. As mentioned previously, the source is the handle (text string or numeric identifier) of the original content provider for the post. Also, to make sure the data is clean for social network analysis purposes, remove any rows where the source is null."
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": 29,
+   "metadata": {},
+   "outputs": [],
+   "source": [
+    "gop_groups_pairs = gop_groups_pairs[['name','target','source']]\n",
+    "gop_groups_pairs = gop_groups_pairs[pd.notnull(gop_groups_pairs['source'])]"
+   ]
+  },
+  {
+   "cell_type": "markdown",
+   "metadata": {},
+   "source": [
+    "We'll delete any rows where the source and the target are identical. NB: this is not relevant when conducting SNAs on groups data since a group cannot act as a 'user' (a group is merely a space for users to post), but it is relevant for pages, i.e. when a user re-shares an earlier post or photo from his / her own timeline. Thus we leave it here for demonstration purposes to show how it can be done."
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": 30,
+   "metadata": {},
+   "outputs": [],
+   "source": [
+    "gop_groups_index = gop_groups_pairs[gop_groups_pairs['target'] == gop_groups_pairs['source']].index\n",
+    "gop_groups_pairs.drop(gop_groups_index, inplace=True)"
+   ]
+  },
+  {
+   "cell_type": "markdown",
+   "metadata": {},
+   "source": [
+    "One measure of strength of relationships between sources and targets is the frequency with which a given source posts to a target -- this is the 'weight' of the relationship. "
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": 31,
+   "metadata": {},
+   "outputs": [],
+   "source": [
+    "gop_groups_weight = pd.DataFrame(gop_groups_pairs.groupby(['name', 'target', 'source']).size().reset_index())\n",
+    "gop_groups_weight = gop_groups_weight.rename(columns={0: 'weight'}).reset_index(drop=True)\n",
+    "gop_groups_weight = gop_groups_weight.sort_values(by='weight', ascending=False).reset_index(drop=True)"
+   ]
+  },
+  {
+   "cell_type": "markdown",
+   "metadata": {},
+   "source": [
+    "We can take a peek at the most prominent information sources posted across all group posts in our snowball sample. This provides us a sense of which sources are influential across the entire sample. "
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": 32,
+   "metadata": {},
+   "outputs": [
+    {
+     "data": {
+      "text/html": [
+       "<div>\n",
+       "<style scoped>\n",
+       "    .dataframe tbody tr th:only-of-type {\n",
+       "        vertical-align: middle;\n",
+       "    }\n",
+       "\n",
+       "    .dataframe tbody tr th {\n",
+       "        vertical-align: top;\n",
+       "    }\n",
+       "\n",
+       "    .dataframe thead th {\n",
+       "        text-align: right;\n",
+       "    }\n",
+       "</style>\n",
+       "<table border=\"1\" class=\"dataframe\">\n",
+       "  <thead>\n",
+       "    <tr style=\"text-align: right;\">\n",
+       "      <th></th>\n",
+       "      <th>weight</th>\n",
+       "    </tr>\n",
+       "    <tr>\n",
+       "      <th>source</th>\n",
+       "      <th></th>\n",
+       "    </tr>\n",
+       "  </thead>\n",
+       "  <tbody>\n",
+       "    <tr>\n",
+       "      <th>RealAmericasVoice</th>\n",
+       "      <td>43</td>\n",
+       "    </tr>\n",
+       "    <tr>\n",
+       "      <th>newsmax</th>\n",
+       "      <td>43</td>\n",
+       "    </tr>\n",
+       "    <tr>\n",
+       "      <th>PeruDMV</th>\n",
+       "      <td>42</td>\n",
+       "    </tr>\n",
+       "    <tr>\n",
+       "      <th>100002780167774</th>\n",
+       "      <td>35</td>\n",
+       "    </tr>\n",
+       "    <tr>\n",
+       "      <th>DonaldJTrumpJr</th>\n",
+       "      <td>31</td>\n",
+       "    </tr>\n",
+       "    <tr>\n",
+       "      <th>MarjorieTaylorGreene</th>\n",
+       "      <td>27</td>\n",
+       "    </tr>\n",
+       "    <tr>\n",
+       "      <th>Conservativity</th>\n",
+       "      <td>24</td>\n",
+       "    </tr>\n",
+       "    <tr>\n",
+       "      <th>DMLNewsApp</th>\n",
+       "      <td>24</td>\n",
+       "    </tr>\n",
+       "    <tr>\n",
+       "      <th>Breitbart</th>\n",
+       "      <td>24</td>\n",
+       "    </tr>\n",
+       "    <tr>\n",
+       "      <th>szamokadatok</th>\n",
+       "      <td>23</td>\n",
+       "    </tr>\n",
+       "    <tr>\n",
+       "      <th>dan.bongino</th>\n",
+       "      <td>23</td>\n",
+       "    </tr>\n",
+       "    <tr>\n",
+       "      <th>bennyjohnson</th>\n",
+       "      <td>23</td>\n",
+       "    </tr>\n",
+       "    <tr>\n",
+       "      <th>998451233647902</th>\n",
+       "      <td>22</td>\n",
+       "    </tr>\n",
+       "    <tr>\n",
+       "      <th>FoxNews</th>\n",
+       "      <td>22</td>\n",
+       "    </tr>\n",
+       "    <tr>\n",
+       "      <th>141991342558232</th>\n",
+       "      <td>20</td>\n",
+       "    </tr>\n",
+       "    <tr>\n",
+       "      <th>terrencekwilliams</th>\n",
+       "      <td>20</td>\n",
+       "    </tr>\n",
+       "    <tr>\n",
+       "      <th>turningpointusa</th>\n",
+       "      <td>19</td>\n",
+       "    </tr>\n",
+       "    <tr>\n",
+       "      <th>DSouzaDinesh</th>\n",
+       "      <td>19</td>\n",
+       "    </tr>\n",
+       "    <tr>\n",
+       "      <th>rsbnetwork</th>\n",
+       "      <td>18</td>\n",
+       "    </tr>\n",
+       "    <tr>\n",
+       "      <th>drandras.aradszki</th>\n",
+       "      <td>18</td>\n",
+       "    </tr>\n",
+       "  </tbody>\n",
+       "</table>\n",
+       "</div>"
+      ],
+      "text/plain": [
+       "                      weight\n",
+       "source                      \n",
+       "RealAmericasVoice         43\n",
+       "newsmax                   43\n",
+       "PeruDMV                   42\n",
+       "100002780167774           35\n",
+       "DonaldJTrumpJr            31\n",
+       "MarjorieTaylorGreene      27\n",
+       "Conservativity            24\n",
+       "DMLNewsApp                24\n",
+       "Breitbart                 24\n",
+       "szamokadatok              23\n",
+       "dan.bongino               23\n",
+       "bennyjohnson              23\n",
+       "998451233647902           22\n",
+       "FoxNews                   22\n",
+       "141991342558232           20\n",
+       "terrencekwilliams         20\n",
+       "turningpointusa           19\n",
+       "DSouzaDinesh              19\n",
+       "rsbnetwork                18\n",
+       "drandras.aradszki         18"
+      ]
+     },
+     "execution_count": 32,
+     "metadata": {},
+     "output_type": "execute_result"
+    }
+   ],
+   "source": [
+    "gop_groups_weight.groupby('source').sum().sort_values(by='weight', ascending=False).head(20)"
+   ]
+  },
+  {
+   "cell_type": "markdown",
+   "metadata": {},
+   "source": [
+    "While these information sources are prominent across the entire sample of snowball groups, it's   however we're interested in extracting groups that form clusters and constitute echo-chambers. To do that, we'll need to use a community detection algorithm to partition the network into discrete and logical communities.\n",
+    "\n",
+    "For our community detection algorithm, we'll create a graph object that includes all sources... "
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": 34,
+   "metadata": {},
+   "outputs": [],
+   "source": [
+    "G = nx.from_pandas_edgelist(gop_groups_weight, source='source', target='name', edge_attr=True)"
+   ]
+  },
+  {
+   "cell_type": "markdown",
+   "metadata": {},
+   "source": [
+    "...and then partition the communities. "
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": 38,
+   "metadata": {},
+   "outputs": [],
+   "source": [
+    "def community_detection(network):\n",
+    "    temp = community.girvan_newman(network)\n",
+    "    temp_top = next(temp)\n",
+    "    temp_next = next(temp)\n",
+    "    return sorted(map(sorted, temp_next))\n",
+    "\n",
+    "gop_communities = community_detection(G)"
+   ]
+  },
+  {
+   "cell_type": "markdown",
+   "metadata": {},
+   "source": [
+    "Now that we created our new graph object and partitioned our communities, we'll see how many discrete, partitioned communities were found with all targets and sources in those communities."
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": 39,
+   "metadata": {},
+   "outputs": [
+    {
+     "name": "stdout",
+     "output_type": "stream",
+     "text": [
+      "0 689\n",
+      "1 309\n",
+      "2 161\n",
+      "3 6\n",
+      "4 5\n",
+      "5 2\n"
+     ]
+    }
+   ],
+   "source": [
+    "for idx, i in enumerate(gop_communities):\n",
+    "    print(idx, len(i))"
+   ]
+  },
+  {
+   "cell_type": "markdown",
+   "metadata": {},
+   "source": [
+    "It looks like we have three pretty large communities (0, 1, and 2) that are worth exploring. We can take a look at which groups from our snowball sample are in these respective groups. \n",
+    "\n",
+    "We'll write a function to extract the names of the groups in our snowball sample (gop_snowball_group_posts) and match them to their respective communities.  \n",
+    "\n",
+    "Then we'll see which snowball groups are in community 0."
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": 40,
+   "metadata": {},
+   "outputs": [
+    {
+     "data": {
+      "text/html": [
+       "<div>\n",
+       "<style scoped>\n",
+       "    .dataframe tbody tr th:only-of-type {\n",
+       "        vertical-align: middle;\n",
+       "    }\n",
+       "\n",
+       "    .dataframe tbody tr th {\n",
+       "        vertical-align: top;\n",
+       "    }\n",
+       "\n",
+       "    .dataframe thead th {\n",
+       "        text-align: right;\n",
+       "    }\n",
+       "</style>\n",
+       "<table border=\"1\" class=\"dataframe\">\n",
+       "  <thead>\n",
+       "    <tr style=\"text-align: right;\">\n",
+       "      <th></th>\n",
+       "      <th>name</th>\n",
+       "      <th>posts</th>\n",
+       "    </tr>\n",
+       "  </thead>\n",
+       "  <tbody>\n",
+       "    <tr>\n",
+       "      <th>0</th>\n",
+       "      <td>Recall Governor Pritzker</td>\n",
+       "      <td>543</td>\n",
+       "    </tr>\n",
+       "    <tr>\n",
+       "      <th>1</th>\n",
+       "      <td>TRUMP TRUTHERS</td>\n",
+       "      <td>449</td>\n",
+       "    </tr>\n",
+       "    <tr>\n",
+       "      <th>2</th>\n",
+       "      <td>Trump Women Landslide 2020</td>\n",
+       "      <td>428</td>\n",
+       "    </tr>\n",
+       "    <tr>\n",
+       "      <th>3</th>\n",
+       "      <td>Stuart Varney - Conservative Economic Journalist</td>\n",
+       "      <td>378</td>\n",
+       "    </tr>\n",
+       "    <tr>\n",
+       "      <th>4</th>\n",
+       "      <td>Patriotic Catholics for President Trump ❤️</td>\n",
+       "      <td>372</td>\n",
+       "    </tr>\n",
+       "    <tr>\n",
+       "      <th>5</th>\n",
+       "      <td>Tucker Carlson Fan Club</td>\n",
+       "      <td>365</td>\n",
+       "    </tr>\n",
+       "    <tr>\n",
+       "      <th>6</th>\n",
+       "      <td>Hispanics for Trump 2020 🇺🇸🇺🇸</td>\n",
+       "      <td>291</td>\n",
+       "    </tr>\n",
+       "    <tr>\n",
+       "      <th>7</th>\n",
+       "      <td>TRUMP AMERICA FOR SAFETY AND FREEDOM</td>\n",
+       "      <td>284</td>\n",
+       "    </tr>\n",
+       "    <tr>\n",
+       "      <th>8</th>\n",
+       "      <td>Chad Prather Fans, Political Discussions Allow...</td>\n",
+       "      <td>235</td>\n",
+       "    </tr>\n",
+       "    <tr>\n",
+       "      <th>9</th>\n",
+       "      <td>Trump Nation</td>\n",
+       "      <td>187</td>\n",
+       "    </tr>\n",
+       "    <tr>\n",
+       "      <th>10</th>\n",
+       "      <td>Greenfield Citizens Association</td>\n",
+       "      <td>168</td>\n",
+       "    </tr>\n",
+       "    <tr>\n",
+       "      <th>11</th>\n",
+       "      <td>Unmask Wichita / Unmask SedgCO</td>\n",
+       "      <td>151</td>\n",
+       "    </tr>\n",
+       "    <tr>\n",
+       "      <th>12</th>\n",
+       "      <td>END TIME NEWS</td>\n",
+       "      <td>149</td>\n",
+       "    </tr>\n",
+       "    <tr>\n",
+       "      <th>13</th>\n",
+       "      <td>Illinois Gasoline Party</td>\n",
+       "      <td>148</td>\n",
+       "    </tr>\n",
+       "    <tr>\n",
+       "      <th>14</th>\n",
+       "      <td>Team Trump Hawaii</td>\n",
+       "      <td>146</td>\n",
+       "    </tr>\n",
+       "    <tr>\n",
+       "      <th>15</th>\n",
+       "      <td>The Daily Ledger</td>\n",
+       "      <td>132</td>\n",
+       "    </tr>\n",
+       "    <tr>\n",
+       "      <th>16</th>\n",
+       "      <td>Keep America Great Warriors</td>\n",
+       "      <td>131</td>\n",
+       "    </tr>\n",
+       "    <tr>\n",
+       "      <th>17</th>\n",
+       "      <td>Orando por Presidente Trump y su Gabinete, no ...</td>\n",
+       "      <td>110</td>\n",
+       "    </tr>\n",
+       "    <tr>\n",
+       "      <th>18</th>\n",
+       "      <td>The Party</td>\n",
+       "      <td>104</td>\n",
+       "    </tr>\n",
+       "    <tr>\n",
+       "      <th>19</th>\n",
+       "      <td>Patriots for Trump</td>\n",
+       "      <td>99</td>\n",
+       "    </tr>\n",
+       "    <tr>\n",
+       "      <th>20</th>\n",
+       "      <td>American patriots</td>\n",
+       "      <td>96</td>\n",
+       "    </tr>\n",
+       "    <tr>\n",
+       "      <th>21</th>\n",
+       "      <td>Westmoreland County Republicans</td>\n",
+       "      <td>83</td>\n",
+       "    </tr>\n",
+       "    <tr>\n",
+       "      <th>22</th>\n",
+       "      <td>PRESIDENT TRUMP (c)</td>\n",
+       "      <td>82</td>\n",
+       "    </tr>\n",
+       "    <tr>\n",
+       "      <th>23</th>\n",
+       "      <td>FEDERAL POLITICS TOPICS Monticello Illinois Op...</td>\n",
+       "      <td>61</td>\n",
+       "    </tr>\n",
+       "    <tr>\n",
+       "      <th>24</th>\n",
+       "      <td>Republicans With Balls And Backbones</td>\n",
+       "      <td>58</td>\n",
+       "    </tr>\n",
+       "    <tr>\n",
+       "      <th>25</th>\n",
+       "      <td>Greenfield MA Republican Town Committee</td>\n",
+       "      <td>45</td>\n",
+       "    </tr>\n",
+       "    <tr>\n",
+       "      <th>26</th>\n",
+       "      <td>Berrien County GOP</td>\n",
+       "      <td>45</td>\n",
+       "    </tr>\n",
+       "    <tr>\n",
+       "      <th>27</th>\n",
+       "      <td>Yellowstone County Republican Women</td>\n",
+       "      <td>38</td>\n",
+       "    </tr>\n",
+       "    <tr>\n",
+       "      <th>28</th>\n",
+       "      <td>Governor Kay Ivey Supporters</td>\n",
+       "      <td>22</td>\n",
+       "    </tr>\n",
+       "    <tr>\n",
+       "      <th>29</th>\n",
+       "      <td>The Conservative Truth</td>\n",
+       "      <td>19</td>\n",
+       "    </tr>\n",
+       "    <tr>\n",
+       "      <th>30</th>\n",
+       "      <td>Missouri Federation of Republican Women</td>\n",
+       "      <td>19</td>\n",
+       "    </tr>\n",
+       "    <tr>\n",
+       "      <th>31</th>\n",
+       "      <td>American Patriots</td>\n",
+       "      <td>19</td>\n",
+       "    </tr>\n",
+       "    <tr>\n",
+       "      <th>32</th>\n",
+       "      <td>Flip Illinois Red 2020</td>\n",
+       "      <td>17</td>\n",
+       "    </tr>\n",
+       "    <tr>\n",
+       "      <th>33</th>\n",
+       "      <td>Republican Party of Murray County Georgia</td>\n",
+       "      <td>9</td>\n",
+       "    </tr>\n",
+       "    <tr>\n",
+       "      <th>34</th>\n",
+       "      <td>Washburn University College Republicans</td>\n",
+       "      <td>2</td>\n",
+       "    </tr>\n",
+       "  </tbody>\n",
+       "</table>\n",
+       "</div>"
+      ],
+      "text/plain": [
+       "                                                 name  posts\n",
+       "0                            Recall Governor Pritzker    543\n",
+       "1                                      TRUMP TRUTHERS    449\n",
+       "2                          Trump Women Landslide 2020    428\n",
+       "3    Stuart Varney - Conservative Economic Journalist    378\n",
+       "4          Patriotic Catholics for President Trump ❤️    372\n",
+       "5                             Tucker Carlson Fan Club    365\n",
+       "6                       Hispanics for Trump 2020 🇺🇸🇺🇸    291\n",
+       "7                TRUMP AMERICA FOR SAFETY AND FREEDOM    284\n",
+       "8   Chad Prather Fans, Political Discussions Allow...    235\n",
+       "9                                        Trump Nation    187\n",
+       "10                    Greenfield Citizens Association    168\n",
+       "11                     Unmask Wichita / Unmask SedgCO    151\n",
+       "12                                      END TIME NEWS    149\n",
+       "13                            Illinois Gasoline Party    148\n",
+       "14                                  Team Trump Hawaii    146\n",
+       "15                                   The Daily Ledger    132\n",
+       "16                        Keep America Great Warriors    131\n",
+       "17  Orando por Presidente Trump y su Gabinete, no ...    110\n",
+       "18                                          The Party    104\n",
+       "19                                 Patriots for Trump     99\n",
+       "20                                  American patriots     96\n",
+       "21                    Westmoreland County Republicans     83\n",
+       "22                                PRESIDENT TRUMP (c)     82\n",
+       "23  FEDERAL POLITICS TOPICS Monticello Illinois Op...     61\n",
+       "24               Republicans With Balls And Backbones     58\n",
+       "25            Greenfield MA Republican Town Committee     45\n",
+       "26                                 Berrien County GOP     45\n",
+       "27                Yellowstone County Republican Women     38\n",
+       "28                       Governor Kay Ivey Supporters     22\n",
+       "29                             The Conservative Truth     19\n",
+       "30            Missouri Federation of Republican Women     19\n",
+       "31                                  American Patriots     19\n",
+       "32                             Flip Illinois Red 2020     17\n",
+       "33          Republican Party of Murray County Georgia      9\n",
+       "34            Washburn University College Republicans      2"
+      ]
+     },
+     "execution_count": 40,
+     "metadata": {},
+     "output_type": "execute_result"
+    }
+   ],
+   "source": [
+    "def community_groups(communities, com_id, snowballdata):\n",
+    "    temp = pd.DataFrame(communities[com_id], columns=['name'])\n",
+    "    temp_posts = snowballdata.loc[snowballdata['name'].isin(temp['name'])]\n",
+    "    temp_groups = temp_posts.groupby(['name']).size().to_frame().reset_index().sort_values(by=0, ascending=False)\n",
+    "    temp_groups = temp_groups.rename(columns={0: 'posts'}).reset_index(drop=True)\n",
+    "    return temp_groups\n",
+    "\n",
+    "community_groups(gop_communities, 0, gop_snowball_group_posts)"
+   ]
+  },
+  {
+   "cell_type": "markdown",
+   "metadata": {},
+   "source": [
+    "This appears to be a pretty obvious and substantial community of Rebuplican Facebook groups and may be a really good community of interest for evaluating influencers shaping Repubican discourse.\n",
+    "\n",
+    "For due diligence pruposes, we'll check the other two large communities just to see if there's another useful community."
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": 43,
+   "metadata": {},
+   "outputs": [
+    {
+     "data": {
+      "text/html": [
+       "<div>\n",
+       "<style scoped>\n",
+       "    .dataframe tbody tr th:only-of-type {\n",
+       "        vertical-align: middle;\n",
+       "    }\n",
+       "\n",
+       "    .dataframe tbody tr th {\n",
+       "        vertical-align: top;\n",
+       "    }\n",
+       "\n",
+       "    .dataframe thead th {\n",
+       "        text-align: right;\n",
+       "    }\n",
+       "</style>\n",
+       "<table border=\"1\" class=\"dataframe\">\n",
+       "  <thead>\n",
+       "    <tr style=\"text-align: right;\">\n",
+       "      <th></th>\n",
+       "      <th>name</th>\n",
+       "      <th>posts</th>\n",
+       "    </tr>\n",
+       "  </thead>\n",
+       "  <tbody>\n",
+       "    <tr>\n",
+       "      <th>0</th>\n",
+       "      <td>Peruanos en DC, Maryland &amp; Virginia (DMV)</td>\n",
+       "      <td>948</td>\n",
+       "    </tr>\n",
+       "  </tbody>\n",
+       "</table>\n",
+       "</div>"
+      ],
+      "text/plain": [
+       "                                        name  posts\n",
+       "0  Peruanos en DC, Maryland & Virginia (DMV)    948"
+      ]
+     },
+     "execution_count": 43,
+     "metadata": {},
+     "output_type": "execute_result"
+    }
+   ],
+   "source": [
+    "community_groups(gop_communities, 1, gop_snowball_group_posts)"
+   ]
+  },
+  {
+   "cell_type": "markdown",
+   "metadata": {},
+   "source": [
+    "Based on the name, there is no indication that this a pro-Republican group. At least one person in the group obviously shared content from the Facebook page of the Republican Party at some point."
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": 42,
+   "metadata": {},
+   "outputs": [
+    {
+     "data": {
+      "text/html": [
+       "<div>\n",
+       "<style scoped>\n",
+       "    .dataframe tbody tr th:only-of-type {\n",
+       "        vertical-align: middle;\n",
+       "    }\n",
+       "\n",
+       "    .dataframe tbody tr th {\n",
+       "        vertical-align: top;\n",
+       "    }\n",
+       "\n",
+       "    .dataframe thead th {\n",
+       "        text-align: right;\n",
+       "    }\n",
+       "</style>\n",
+       "<table border=\"1\" class=\"dataframe\">\n",
+       "  <thead>\n",
+       "    <tr style=\"text-align: right;\">\n",
+       "      <th></th>\n",
+       "      <th>name</th>\n",
+       "      <th>posts</th>\n",
+       "    </tr>\n",
+       "  </thead>\n",
+       "  <tbody>\n",
+       "    <tr>\n",
+       "      <th>0</th>\n",
+       "      <td>Szeretem a FIDESZt,hisz nála jobb nincs!</td>\n",
+       "      <td>1641</td>\n",
+       "    </tr>\n",
+       "  </tbody>\n",
+       "</table>\n",
+       "</div>"
+      ],
+      "text/plain": [
+       "                                       name  posts\n",
+       "0  Szeretem a FIDESZt,hisz nála jobb nincs!   1641"
+      ]
+     },
+     "execution_count": 42,
+     "metadata": {},
+     "output_type": "execute_result"
+    }
+   ],
+   "source": [
+    "community_groups(gop_communities, 2, gop_snowball_group_posts)"
+   ]
+  },
+  {
+   "cell_type": "markdown",
+   "metadata": {},
+   "source": [
+    "Again, based on the name, which seemingly refers to a Hungarian political party, there is no indication this is a pro-Republican group and it can be ignored for our purposes."
+   ]
+  },
+  {
+   "cell_type": "markdown",
+   "metadata": {},
+   "source": [
+    "It appears that community 0 is a good community of Republican Facebook groups that could be analyzed longitudinally and evaluate who is influencing discourse over time.\n",
+    "\n",
+    "We'll save this community of groups..."
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": 45,
+   "metadata": {},
+   "outputs": [],
+   "source": [
+    "gop_community = community_groups(gop_communities, 0, gop_snowball_group_posts)"
+   ]
+  },
+  {
+   "cell_type": "markdown",
+   "metadata": {},
+   "source": [
+    "...then we'll grab the posts from this community from our snowball sample... "
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": 47,
+   "metadata": {},
+   "outputs": [],
+   "source": [
+    "gop_community_groups = gop_snowball_group_posts[gop_snowball_group_posts['name'].isin(gop_community['name'])]"
+   ]
+  },
+  {
+   "cell_type": "markdown",
+   "metadata": {},
+   "source": [
+    "...then from these posts, we'll prepare this community for batch upload to CrowdTangle and export a CSV file to do (make sure you have a list of groups in CrowdTangle that match the 'listname' you assign below)"
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": 48,
+   "metadata": {},
+   "outputs": [],
+   "source": [
+    "def prep_batch_from_posts(data, atype='pages', minsize=0, listname='null'):\n",
+    "    df = data\n",
+    "    df = df.groupby(['name', 'url', 'accountType']).size().to_frame().reset_index().sort_values(by=0, ascending=False)\n",
+    "    if atype == 'pages':\n",
+    "        df1 = df.loc[((df['accountType'] == 'facebook_page') & (df[0] > minsize))]\n",
+    "    else: #need to fix the else to set to 'groups' as an option -- not a big deal right now\n",
+    "        df1 = df.loc[((df['accountType'] == 'facebook_group') & (df[0] > minsize))]\n",
+    "    df1['List'] = listname\n",
+    "    df1 = df1.rename(columns={\"url\": \"Page or Account URL\"}).reset_index(drop=True)\n",
+    "    return df1[['Page or Account URL', 'List']] \n",
+    "\n",
+    "gop_community_batch = prep_batch_from_posts(gop_community_groups, atype='groups', listname='GOP Community Groups')\n",
+    "gop_community_batch.to_csv(\"gop_community_groups.csv\", index=False)"
+   ]
+  },
+  {
+   "cell_type": "markdown",
+   "metadata": {},
+   "source": [
+    "Once you have batch uploaded the community to CrowdTangle, you can use this community to evaluate which sources of information are most influential within community over a period of time. You could also update this community at any time by re-running the code to this point and uploading fresh batches of data to CrowdTangle (Don't worry about duplication - CrowdTangle will handle duplicates and will not include the same page or group twice in a list!)"
+   ]
+  },
+  {
+   "cell_type": "markdown",
+   "metadata": {},
+   "source": [
+    "After batch upload to CrowdTangle, you can find the list id using the get_list_info() function created earlier in the notebook."
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": 50,
+   "metadata": {},
+   "outputs": [
+    {
+     "data": {
+      "text/plain": [
+       "[{'id': 1490375, 'title': 'Republican Snowball Pages', 'type': 'LIST'},\n",
+       " {'id': 1490376, 'title': 'Republican Snowball Groups', 'type': 'LIST'},\n",
+       " {'id': 1490497, 'title': 'GA Republican Groups', 'type': 'LIST'},\n",
+       " {'id': 1500468, 'title': 'RNC Snowball', 'type': 'LIST'},\n",
+       " {'id': 1501381, 'title': 'Republican Community', 'type': 'LIST'},\n",
+       " {'id': 1504991, 'title': 'Republican Community Pages', 'type': 'LIST'},\n",
+       " {'id': 1519020, 'title': 'GOP Influencer Snowball Groups', 'type': 'LIST'},\n",
+       " {'id': 1519132, 'title': 'GOP Community Groups', 'type': 'LIST'}]"
+      ]
+     },
+     "execution_count": 50,
+     "metadata": {},
+     "output_type": "execute_result"
+    }
+   ],
+   "source": [
+    "list_info = get_list_info()\n",
+    "list_info['result']['lists']"
+   ]
+  },
+  {
+   "cell_type": "markdown",
+   "metadata": {},
+   "source": [
+    "As you can see, the newly created GOP Community Groups list has the id '1519132'\n",
+    "\n",
+    "If you wanted to maintain this community as a static community in which you can identify which sources are becoming more or less influential over time - as well as identifying new or emerging influencers, you could run the following code each week:"
+   ]
+  },
+  {
+   "cell_type": "markdown",
+   "metadata": {},
+   "source": [
+    "Step 1: Get the past week's posts from the community of groups (be sure to change the date)."
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": 51,
+   "metadata": {},
+   "outputs": [
+    {
+     "name": "stdout",
+     "output_type": "stream",
+     "text": [
+      "https://api.crowdtangle.com/posts?token=S3Bhx2kk4yZaiFKsW19PwlT04kW9azGHBPaI1g6s&listIds=1519132&startDate=2021-03-02&endDate=2021-03-09&count=100&sortBy=total_interactions&offset=0\n",
+      "https://api.crowdtangle.com/posts?token=S3Bhx2kk4yZaiFKsW19PwlT04kW9azGHBPaI1g6s&listIds=1519132&startDate=2021-03-02&endDate=2021-03-09&count=100&sortBy=total_interactions&offset=100\n",
+      "https://api.crowdtangle.com/posts?token=S3Bhx2kk4yZaiFKsW19PwlT04kW9azGHBPaI1g6s&listIds=1519132&startDate=2021-03-02&endDate=2021-03-09&count=100&sortBy=total_interactions&offset=200\n",
+      "https://api.crowdtangle.com/posts?token=S3Bhx2kk4yZaiFKsW19PwlT04kW9azGHBPaI1g6s&listIds=1519132&startDate=2021-03-02&endDate=2021-03-09&count=100&sortBy=total_interactions&offset=300\n",
+      "https://api.crowdtangle.com/posts?token=S3Bhx2kk4yZaiFKsW19PwlT04kW9azGHBPaI1g6s&listIds=1519132&startDate=2021-03-02&endDate=2021-03-09&count=100&sortBy=total_interactions&offset=400\n",
+      "https://api.crowdtangle.com/posts?token=S3Bhx2kk4yZaiFKsW19PwlT04kW9azGHBPaI1g6s&listIds=1519132&startDate=2021-03-02&endDate=2021-03-09&count=100&sortBy=total_interactions&offset=500\n",
+      "https://api.crowdtangle.com/posts?token=S3Bhx2kk4yZaiFKsW19PwlT04kW9azGHBPaI1g6s&listIds=1519132&startDate=2021-03-02&endDate=2021-03-09&count=100&sortBy=total_interactions&offset=600\n",
+      "https://api.crowdtangle.com/posts?token=S3Bhx2kk4yZaiFKsW19PwlT04kW9azGHBPaI1g6s&listIds=1519132&startDate=2021-03-02&endDate=2021-03-09&count=100&sortBy=total_interactions&offset=700\n",
+      "https://api.crowdtangle.com/posts?token=S3Bhx2kk4yZaiFKsW19PwlT04kW9azGHBPaI1g6s&listIds=1519132&startDate=2021-03-02&endDate=2021-03-09&count=100&sortBy=total_interactions&offset=800\n",
+      "https://api.crowdtangle.com/posts?token=S3Bhx2kk4yZaiFKsW19PwlT04kW9azGHBPaI1g6s&listIds=1519132&startDate=2021-03-02&endDate=2021-03-09&count=100&sortBy=total_interactions&offset=900\n",
+      "https://api.crowdtangle.com/posts?token=S3Bhx2kk4yZaiFKsW19PwlT04kW9azGHBPaI1g6s&listIds=1519132&startDate=2021-03-02&endDate=2021-03-09&count=100&sortBy=total_interactions&offset=1000\n",
+      "https://api.crowdtangle.com/posts?token=S3Bhx2kk4yZaiFKsW19PwlT04kW9azGHBPaI1g6s&listIds=1519132&startDate=2021-03-02&endDate=2021-03-09&count=100&sortBy=total_interactions&offset=1100\n",
+      "https://api.crowdtangle.com/posts?token=S3Bhx2kk4yZaiFKsW19PwlT04kW9azGHBPaI1g6s&listIds=1519132&startDate=2021-03-02&endDate=2021-03-09&count=100&sortBy=total_interactions&offset=1200\n",
+      "https://api.crowdtangle.com/posts?token=S3Bhx2kk4yZaiFKsW19PwlT04kW9azGHBPaI1g6s&listIds=1519132&startDate=2021-03-02&endDate=2021-03-09&count=100&sortBy=total_interactions&offset=1300\n",
+      "https://api.crowdtangle.com/posts?token=S3Bhx2kk4yZaiFKsW19PwlT04kW9azGHBPaI1g6s&listIds=1519132&startDate=2021-03-02&endDate=2021-03-09&count=100&sortBy=total_interactions&offset=1400\n",
+      "https://api.crowdtangle.com/posts?token=S3Bhx2kk4yZaiFKsW19PwlT04kW9azGHBPaI1g6s&listIds=1519132&startDate=2021-03-02&endDate=2021-03-09&count=100&sortBy=total_interactions&offset=1500\n",
+      "https://api.crowdtangle.com/posts?token=S3Bhx2kk4yZaiFKsW19PwlT04kW9azGHBPaI1g6s&listIds=1519132&startDate=2021-03-02&endDate=2021-03-09&count=100&sortBy=total_interactions&offset=1600\n",
+      "https://api.crowdtangle.com/posts?token=S3Bhx2kk4yZaiFKsW19PwlT04kW9azGHBPaI1g6s&listIds=1519132&startDate=2021-03-02&endDate=2021-03-09&count=100&sortBy=total_interactions&offset=1700\n",
+      "https://api.crowdtangle.com/posts?token=S3Bhx2kk4yZaiFKsW19PwlT04kW9azGHBPaI1g6s&listIds=1519132&startDate=2021-03-02&endDate=2021-03-09&count=100&sortBy=total_interactions&offset=1800\n",
+      "https://api.crowdtangle.com/posts?token=S3Bhx2kk4yZaiFKsW19PwlT04kW9azGHBPaI1g6s&listIds=1519132&startDate=2021-03-02&endDate=2021-03-09&count=100&sortBy=total_interactions&offset=1900\n",
+      "https://api.crowdtangle.com/posts?token=S3Bhx2kk4yZaiFKsW19PwlT04kW9azGHBPaI1g6s&listIds=1519132&startDate=2021-03-02&endDate=2021-03-09&count=100&sortBy=total_interactions&offset=2000\n",
+      "https://api.crowdtangle.com/posts?token=S3Bhx2kk4yZaiFKsW19PwlT04kW9azGHBPaI1g6s&listIds=1519132&startDate=2021-03-02&endDate=2021-03-09&count=100&sortBy=total_interactions&offset=2100\n",
+      "https://api.crowdtangle.com/posts?token=S3Bhx2kk4yZaiFKsW19PwlT04kW9azGHBPaI1g6s&listIds=1519132&startDate=2021-03-02&endDate=2021-03-09&count=100&sortBy=total_interactions&offset=2200\n",
+      "https://api.crowdtangle.com/posts?token=S3Bhx2kk4yZaiFKsW19PwlT04kW9azGHBPaI1g6s&listIds=1519132&startDate=2021-03-02&endDate=2021-03-09&count=100&sortBy=total_interactions&offset=2300\n",
+      "https://api.crowdtangle.com/posts?token=S3Bhx2kk4yZaiFKsW19PwlT04kW9azGHBPaI1g6s&listIds=1519132&startDate=2021-03-02&endDate=2021-03-09&count=100&sortBy=total_interactions&offset=2400\n",
+      "https://api.crowdtangle.com/posts?token=S3Bhx2kk4yZaiFKsW19PwlT04kW9azGHBPaI1g6s&listIds=1519132&startDate=2021-03-02&endDate=2021-03-09&count=100&sortBy=total_interactions&offset=2500\n",
+      "https://api.crowdtangle.com/posts?token=S3Bhx2kk4yZaiFKsW19PwlT04kW9azGHBPaI1g6s&listIds=1519132&startDate=2021-03-02&endDate=2021-03-09&count=100&sortBy=total_interactions&offset=2600\n",
+      "https://api.crowdtangle.com/posts?token=S3Bhx2kk4yZaiFKsW19PwlT04kW9azGHBPaI1g6s&listIds=1519132&startDate=2021-03-02&endDate=2021-03-09&count=100&sortBy=total_interactions&offset=2700\n",
+      "https://api.crowdtangle.com/posts?token=S3Bhx2kk4yZaiFKsW19PwlT04kW9azGHBPaI1g6s&listIds=1519132&startDate=2021-03-02&endDate=2021-03-09&count=100&sortBy=total_interactions&offset=2800\n",
+      "https://api.crowdtangle.com/posts?token=S3Bhx2kk4yZaiFKsW19PwlT04kW9azGHBPaI1g6s&listIds=1519132&startDate=2021-03-02&endDate=2021-03-09&count=100&sortBy=total_interactions&offset=2900\n",
+      "https://api.crowdtangle.com/posts?token=S3Bhx2kk4yZaiFKsW19PwlT04kW9azGHBPaI1g6s&listIds=1519132&startDate=2021-03-02&endDate=2021-03-09&count=100&sortBy=total_interactions&offset=3000\n",
+      "https://api.crowdtangle.com/posts?token=S3Bhx2kk4yZaiFKsW19PwlT04kW9azGHBPaI1g6s&listIds=1519132&startDate=2021-03-02&endDate=2021-03-09&count=100&sortBy=total_interactions&offset=3100\n",
+      "https://api.crowdtangle.com/posts?token=S3Bhx2kk4yZaiFKsW19PwlT04kW9azGHBPaI1g6s&listIds=1519132&startDate=2021-03-02&endDate=2021-03-09&count=100&sortBy=total_interactions&offset=3200\n",
+      "https://api.crowdtangle.com/posts?token=S3Bhx2kk4yZaiFKsW19PwlT04kW9azGHBPaI1g6s&listIds=1519132&startDate=2021-03-02&endDate=2021-03-09&count=100&sortBy=total_interactions&offset=3300\n",
+      "https://api.crowdtangle.com/posts?token=S3Bhx2kk4yZaiFKsW19PwlT04kW9azGHBPaI1g6s&listIds=1519132&startDate=2021-03-02&endDate=2021-03-09&count=100&sortBy=total_interactions&offset=3400\n",
+      "https://api.crowdtangle.com/posts?token=S3Bhx2kk4yZaiFKsW19PwlT04kW9azGHBPaI1g6s&listIds=1519132&startDate=2021-03-02&endDate=2021-03-09&count=100&sortBy=total_interactions&offset=3500\n",
+      "https://api.crowdtangle.com/posts?token=S3Bhx2kk4yZaiFKsW19PwlT04kW9azGHBPaI1g6s&listIds=1519132&startDate=2021-03-02&endDate=2021-03-09&count=100&sortBy=total_interactions&offset=3600\n",
+      "https://api.crowdtangle.com/posts?token=S3Bhx2kk4yZaiFKsW19PwlT04kW9azGHBPaI1g6s&listIds=1519132&startDate=2021-03-02&endDate=2021-03-09&count=100&sortBy=total_interactions&offset=3700\n",
+      "https://api.crowdtangle.com/posts?token=S3Bhx2kk4yZaiFKsW19PwlT04kW9azGHBPaI1g6s&listIds=1519132&startDate=2021-03-02&endDate=2021-03-09&count=100&sortBy=total_interactions&offset=3800\n",
+      "https://api.crowdtangle.com/posts?token=S3Bhx2kk4yZaiFKsW19PwlT04kW9azGHBPaI1g6s&listIds=1519132&startDate=2021-03-02&endDate=2021-03-09&count=100&sortBy=total_interactions&offset=3900\n",
+      "https://api.crowdtangle.com/posts?token=S3Bhx2kk4yZaiFKsW19PwlT04kW9azGHBPaI1g6s&listIds=1519132&startDate=2021-03-02&endDate=2021-03-09&count=100&sortBy=total_interactions&offset=4000\n",
+      "https://api.crowdtangle.com/posts?token=S3Bhx2kk4yZaiFKsW19PwlT04kW9azGHBPaI1g6s&listIds=1519132&startDate=2021-03-02&endDate=2021-03-09&count=100&sortBy=total_interactions&offset=4100\n",
+      "https://api.crowdtangle.com/posts?token=S3Bhx2kk4yZaiFKsW19PwlT04kW9azGHBPaI1g6s&listIds=1519132&startDate=2021-03-02&endDate=2021-03-09&count=100&sortBy=total_interactions&offset=4200\n",
+      "https://api.crowdtangle.com/posts?token=S3Bhx2kk4yZaiFKsW19PwlT04kW9azGHBPaI1g6s&listIds=1519132&startDate=2021-03-02&endDate=2021-03-09&count=100&sortBy=total_interactions&offset=4300\n",
+      "https://api.crowdtangle.com/posts?token=S3Bhx2kk4yZaiFKsW19PwlT04kW9azGHBPaI1g6s&listIds=1519132&startDate=2021-03-02&endDate=2021-03-09&count=100&sortBy=total_interactions&offset=4400\n"
+     ]
+    },
+    {
+     "name": "stdout",
+     "output_type": "stream",
+     "text": [
+      "https://api.crowdtangle.com/posts?token=S3Bhx2kk4yZaiFKsW19PwlT04kW9azGHBPaI1g6s&listIds=1519132&startDate=2021-03-02&endDate=2021-03-09&count=100&sortBy=total_interactions&offset=4500\n",
+      "https://api.crowdtangle.com/posts?token=S3Bhx2kk4yZaiFKsW19PwlT04kW9azGHBPaI1g6s&listIds=1519132&startDate=2021-03-02&endDate=2021-03-09&count=100&sortBy=total_interactions&offset=4600\n",
+      "https://api.crowdtangle.com/posts?token=S3Bhx2kk4yZaiFKsW19PwlT04kW9azGHBPaI1g6s&listIds=1519132&startDate=2021-03-02&endDate=2021-03-09&count=100&sortBy=total_interactions&offset=4700\n",
+      "https://api.crowdtangle.com/posts?token=S3Bhx2kk4yZaiFKsW19PwlT04kW9azGHBPaI1g6s&listIds=1519132&startDate=2021-03-02&endDate=2021-03-09&count=100&sortBy=total_interactions&offset=4800\n",
+      "https://api.crowdtangle.com/posts?token=S3Bhx2kk4yZaiFKsW19PwlT04kW9azGHBPaI1g6s&listIds=1519132&startDate=2021-03-02&endDate=2021-03-09&count=100&sortBy=total_interactions&offset=4900\n",
+      "https://api.crowdtangle.com/posts?token=S3Bhx2kk4yZaiFKsW19PwlT04kW9azGHBPaI1g6s&listIds=1519132&startDate=2021-03-02&endDate=2021-03-09&count=100&sortBy=total_interactions&offset=5000\n",
+      "https://api.crowdtangle.com/posts?token=S3Bhx2kk4yZaiFKsW19PwlT04kW9azGHBPaI1g6s&listIds=1519132&startDate=2021-03-02&endDate=2021-03-09&count=100&sortBy=total_interactions&offset=5100\n",
+      "https://api.crowdtangle.com/posts?token=S3Bhx2kk4yZaiFKsW19PwlT04kW9azGHBPaI1g6s&listIds=1519132&startDate=2021-03-02&endDate=2021-03-09&count=100&sortBy=total_interactions&offset=5200\n",
+      "https://api.crowdtangle.com/posts?token=S3Bhx2kk4yZaiFKsW19PwlT04kW9azGHBPaI1g6s&listIds=1519132&startDate=2021-03-02&endDate=2021-03-09&count=100&sortBy=total_interactions&offset=5300\n",
+      "https://api.crowdtangle.com/posts?token=S3Bhx2kk4yZaiFKsW19PwlT04kW9azGHBPaI1g6s&listIds=1519132&startDate=2021-03-02&endDate=2021-03-09&count=100&sortBy=total_interactions&offset=5400\n",
+      "https://api.crowdtangle.com/posts?token=S3Bhx2kk4yZaiFKsW19PwlT04kW9azGHBPaI1g6s&listIds=1519132&startDate=2021-03-02&endDate=2021-03-09&count=100&sortBy=total_interactions&offset=5500\n",
+      "https://api.crowdtangle.com/posts?token=S3Bhx2kk4yZaiFKsW19PwlT04kW9azGHBPaI1g6s&listIds=1519132&startDate=2021-03-02&endDate=2021-03-09&count=100&sortBy=total_interactions&offset=5600\n",
+      "https://api.crowdtangle.com/posts?token=S3Bhx2kk4yZaiFKsW19PwlT04kW9azGHBPaI1g6s&listIds=1519132&startDate=2021-03-02&endDate=2021-03-09&count=100&sortBy=total_interactions&offset=5700\n",
+      "https://api.crowdtangle.com/posts?token=S3Bhx2kk4yZaiFKsW19PwlT04kW9azGHBPaI1g6s&listIds=1519132&startDate=2021-03-02&endDate=2021-03-09&count=100&sortBy=total_interactions&offset=5800\n",
+      "https://api.crowdtangle.com/posts?token=S3Bhx2kk4yZaiFKsW19PwlT04kW9azGHBPaI1g6s&listIds=1519132&startDate=2021-03-02&endDate=2021-03-09&count=100&sortBy=total_interactions&offset=5900\n",
+      "https://api.crowdtangle.com/posts?token=S3Bhx2kk4yZaiFKsW19PwlT04kW9azGHBPaI1g6s&listIds=1519132&startDate=2021-03-02&endDate=2021-03-09&count=100&sortBy=total_interactions&offset=6000\n",
+      "https://api.crowdtangle.com/posts?token=S3Bhx2kk4yZaiFKsW19PwlT04kW9azGHBPaI1g6s&listIds=1519132&startDate=2021-03-02&endDate=2021-03-09&count=100&sortBy=total_interactions&offset=6100\n",
+      "https://api.crowdtangle.com/posts?token=S3Bhx2kk4yZaiFKsW19PwlT04kW9azGHBPaI1g6s&listIds=1519132&startDate=2021-03-02&endDate=2021-03-09&count=100&sortBy=total_interactions&offset=6200\n",
+      "https://api.crowdtangle.com/posts?token=S3Bhx2kk4yZaiFKsW19PwlT04kW9azGHBPaI1g6s&listIds=1519132&startDate=2021-03-02&endDate=2021-03-09&count=100&sortBy=total_interactions&offset=6300\n",
+      "https://api.crowdtangle.com/posts?token=S3Bhx2kk4yZaiFKsW19PwlT04kW9azGHBPaI1g6s&listIds=1519132&startDate=2021-03-02&endDate=2021-03-09&count=100&sortBy=total_interactions&offset=6400\n",
+      "https://api.crowdtangle.com/posts?token=S3Bhx2kk4yZaiFKsW19PwlT04kW9azGHBPaI1g6s&listIds=1519132&startDate=2021-03-02&endDate=2021-03-09&count=100&sortBy=total_interactions&offset=6500\n",
+      "https://api.crowdtangle.com/posts?token=S3Bhx2kk4yZaiFKsW19PwlT04kW9azGHBPaI1g6s&listIds=1519132&startDate=2021-03-02&endDate=2021-03-09&count=100&sortBy=total_interactions&offset=6600\n",
+      "https://api.crowdtangle.com/posts?token=S3Bhx2kk4yZaiFKsW19PwlT04kW9azGHBPaI1g6s&listIds=1519132&startDate=2021-03-02&endDate=2021-03-09&count=100&sortBy=total_interactions&offset=6700\n",
+      "https://api.crowdtangle.com/posts?token=S3Bhx2kk4yZaiFKsW19PwlT04kW9azGHBPaI1g6s&listIds=1519132&startDate=2021-03-02&endDate=2021-03-09&count=100&sortBy=total_interactions&offset=6800\n",
+      "https://api.crowdtangle.com/posts?token=S3Bhx2kk4yZaiFKsW19PwlT04kW9azGHBPaI1g6s&listIds=1519132&startDate=2021-03-02&endDate=2021-03-09&count=100&sortBy=total_interactions&offset=6900\n",
+      "https://api.crowdtangle.com/posts?token=S3Bhx2kk4yZaiFKsW19PwlT04kW9azGHBPaI1g6s&listIds=1519132&startDate=2021-03-02&endDate=2021-03-09&count=100&sortBy=total_interactions&offset=7000\n",
+      "https://api.crowdtangle.com/posts?token=S3Bhx2kk4yZaiFKsW19PwlT04kW9azGHBPaI1g6s&listIds=1519132&startDate=2021-03-02&endDate=2021-03-09&count=100&sortBy=total_interactions&offset=7100\n",
+      "https://api.crowdtangle.com/posts?token=S3Bhx2kk4yZaiFKsW19PwlT04kW9azGHBPaI1g6s&listIds=1519132&startDate=2021-03-02&endDate=2021-03-09&count=100&sortBy=total_interactions&offset=7200\n",
+      "https://api.crowdtangle.com/posts?token=S3Bhx2kk4yZaiFKsW19PwlT04kW9azGHBPaI1g6s&listIds=1519132&startDate=2021-03-02&endDate=2021-03-09&count=100&sortBy=total_interactions&offset=7300\n",
+      "https://api.crowdtangle.com/posts?token=S3Bhx2kk4yZaiFKsW19PwlT04kW9azGHBPaI1g6s&listIds=1519132&startDate=2021-03-02&endDate=2021-03-09&count=100&sortBy=total_interactions&offset=7400\n",
+      "https://api.crowdtangle.com/posts?token=S3Bhx2kk4yZaiFKsW19PwlT04kW9azGHBPaI1g6s&listIds=1519132&startDate=2021-03-02&endDate=2021-03-09&count=100&sortBy=total_interactions&offset=7500\n",
+      "https://api.crowdtangle.com/posts?token=S3Bhx2kk4yZaiFKsW19PwlT04kW9azGHBPaI1g6s&listIds=1519132&startDate=2021-03-02&endDate=2021-03-09&count=100&sortBy=total_interactions&offset=7600\n",
+      "https://api.crowdtangle.com/posts?token=S3Bhx2kk4yZaiFKsW19PwlT04kW9azGHBPaI1g6s&listIds=1519132&startDate=2021-03-02&endDate=2021-03-09&count=100&sortBy=total_interactions&offset=7700\n",
+      "https://api.crowdtangle.com/posts?token=S3Bhx2kk4yZaiFKsW19PwlT04kW9azGHBPaI1g6s&listIds=1519132&startDate=2021-03-02&endDate=2021-03-09&count=100&sortBy=total_interactions&offset=7800\n",
+      "https://api.crowdtangle.com/posts?token=S3Bhx2kk4yZaiFKsW19PwlT04kW9azGHBPaI1g6s&listIds=1519132&startDate=2021-03-02&endDate=2021-03-09&count=100&sortBy=total_interactions&offset=7900\n",
+      "https://api.crowdtangle.com/posts?token=S3Bhx2kk4yZaiFKsW19PwlT04kW9azGHBPaI1g6s&listIds=1519132&startDate=2021-03-02&endDate=2021-03-09&count=100&sortBy=total_interactions&offset=8000\n",
+      "https://api.crowdtangle.com/posts?token=S3Bhx2kk4yZaiFKsW19PwlT04kW9azGHBPaI1g6s&listIds=1519132&startDate=2021-03-02&endDate=2021-03-09&count=100&sortBy=total_interactions&offset=8100\n",
+      "https://api.crowdtangle.com/posts?token=S3Bhx2kk4yZaiFKsW19PwlT04kW9azGHBPaI1g6s&listIds=1519132&startDate=2021-03-02&endDate=2021-03-09&count=100&sortBy=total_interactions&offset=8200\n",
+      "https://api.crowdtangle.com/posts?token=S3Bhx2kk4yZaiFKsW19PwlT04kW9azGHBPaI1g6s&listIds=1519132&startDate=2021-03-02&endDate=2021-03-09&count=100&sortBy=total_interactions&offset=8300\n",
+      "https://api.crowdtangle.com/posts?token=S3Bhx2kk4yZaiFKsW19PwlT04kW9azGHBPaI1g6s&listIds=1519132&startDate=2021-03-02&endDate=2021-03-09&count=100&sortBy=total_interactions&offset=8400\n",
+      "https://api.crowdtangle.com/posts?token=S3Bhx2kk4yZaiFKsW19PwlT04kW9azGHBPaI1g6s&listIds=1519132&startDate=2021-03-02&endDate=2021-03-09&count=100&sortBy=total_interactions&offset=8500\n",
+      "https://api.crowdtangle.com/posts?token=S3Bhx2kk4yZaiFKsW19PwlT04kW9azGHBPaI1g6s&listIds=1519132&startDate=2021-03-02&endDate=2021-03-09&count=100&sortBy=total_interactions&offset=8600\n",
+      "https://api.crowdtangle.com/posts?token=S3Bhx2kk4yZaiFKsW19PwlT04kW9azGHBPaI1g6s&listIds=1519132&startDate=2021-03-02&endDate=2021-03-09&count=100&sortBy=total_interactions&offset=8700\n",
+      "https://api.crowdtangle.com/posts?token=S3Bhx2kk4yZaiFKsW19PwlT04kW9azGHBPaI1g6s&listIds=1519132&startDate=2021-03-02&endDate=2021-03-09&count=100&sortBy=total_interactions&offset=8800\n",
+      "https://api.crowdtangle.com/posts?token=S3Bhx2kk4yZaiFKsW19PwlT04kW9azGHBPaI1g6s&listIds=1519132&startDate=2021-03-02&endDate=2021-03-09&count=100&sortBy=total_interactions&offset=8900\n"
+     ]
+    },
+    {
+     "name": "stdout",
+     "output_type": "stream",
+     "text": [
+      "https://api.crowdtangle.com/posts?token=S3Bhx2kk4yZaiFKsW19PwlT04kW9azGHBPaI1g6s&listIds=1519132&startDate=2021-03-02&endDate=2021-03-09&count=100&sortBy=total_interactions&offset=9000\n",
+      "https://api.crowdtangle.com/posts?token=S3Bhx2kk4yZaiFKsW19PwlT04kW9azGHBPaI1g6s&listIds=1519132&startDate=2021-03-02&endDate=2021-03-09&count=100&sortBy=total_interactions&offset=9100\n",
+      "https://api.crowdtangle.com/posts?token=S3Bhx2kk4yZaiFKsW19PwlT04kW9azGHBPaI1g6s&listIds=1519132&startDate=2021-03-02&endDate=2021-03-09&count=100&sortBy=total_interactions&offset=9200\n",
+      "https://api.crowdtangle.com/posts?token=S3Bhx2kk4yZaiFKsW19PwlT04kW9azGHBPaI1g6s&listIds=1519132&startDate=2021-03-02&endDate=2021-03-09&count=100&sortBy=total_interactions&offset=9300\n",
+      "https://api.crowdtangle.com/posts?token=S3Bhx2kk4yZaiFKsW19PwlT04kW9azGHBPaI1g6s&listIds=1519132&startDate=2021-03-02&endDate=2021-03-09&count=100&sortBy=total_interactions&offset=9400\n",
+      "https://api.crowdtangle.com/posts?token=S3Bhx2kk4yZaiFKsW19PwlT04kW9azGHBPaI1g6s&listIds=1519132&startDate=2021-03-02&endDate=2021-03-09&count=100&sortBy=total_interactions&offset=9500\n",
+      "https://api.crowdtangle.com/posts?token=S3Bhx2kk4yZaiFKsW19PwlT04kW9azGHBPaI1g6s&listIds=1519132&startDate=2021-03-02&endDate=2021-03-09&count=100&sortBy=total_interactions&offset=9600\n",
+      "https://api.crowdtangle.com/posts?token=S3Bhx2kk4yZaiFKsW19PwlT04kW9azGHBPaI1g6s&listIds=1519132&startDate=2021-03-02&endDate=2021-03-09&count=100&sortBy=total_interactions&offset=9700\n",
+      "https://api.crowdtangle.com/posts?token=S3Bhx2kk4yZaiFKsW19PwlT04kW9azGHBPaI1g6s&listIds=1519132&startDate=2021-03-02&endDate=2021-03-09&count=100&sortBy=total_interactions&offset=9800\n",
+      "https://api.crowdtangle.com/posts?token=S3Bhx2kk4yZaiFKsW19PwlT04kW9azGHBPaI1g6s&listIds=1519132&startDate=2021-03-02&endDate=2021-03-09&count=100&sortBy=total_interactions&offset=9900\n"
+     ]
+    }
+   ],
+   "source": [
+    "idx = '1519132' #GOP Community Groups \n",
+    "start = '2021-03-02' #March 2 2021\n",
+    "end = '2021-03-09' #March 2021\n",
+    "allposts = []\n",
+    "get_posts()"
+   ]
+  },
+  {
+   "cell_type": "markdown",
+   "metadata": {},
+   "source": [
+    "Step 2: Convert posts to dataframe"
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": 52,
+   "metadata": {},
+   "outputs": [],
+   "source": [
+    "gop_community_posts = posts_toframe(allposts)"
+   ]
+  },
+  {
+   "cell_type": "markdown",
+   "metadata": {},
+   "source": [
+    "Step 3: Clean posts dataframe"
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": 53,
+   "metadata": {},
+   "outputs": [],
+   "source": [
+    "gop_community_posts = gop_community_posts.drop([0], axis=1) #removes all columns with name '0'\n",
+    "gop_community_posts = gop_community_posts.drop(['expandedLinks', 'media', 'expected'], axis=1) #removes columns which have list objects as values"
+   ]
+  },
+  {
+   "cell_type": "markdown",
+   "metadata": {},
+   "source": [
+    "Step 4: Use prep_sna_group() function to isolate targets and sources"
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": 54,
+   "metadata": {},
+   "outputs": [],
+   "source": [
+    "gop_community_pairs = prep_sna_group(gop_community_posts) "
+   ]
+  },
+  {
+   "cell_type": "markdown",
+   "metadata": {},
+   "source": [
+    "Step 5: Subset the dataframe and rename the columns"
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": 56,
+   "metadata": {},
+   "outputs": [],
+   "source": [
+    "gop_community_pairs = gop_community_pairs[['name','target','source']]\n",
+    "gop_community_pairs = gop_community_pairs[pd.notnull(gop_community_pairs['source'])]"
+   ]
+  },
+  {
+   "cell_type": "markdown",
+   "metadata": {},
+   "source": [
+    "Step 6: Get the weight of sources in the dataframe"
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": 57,
+   "metadata": {},
+   "outputs": [],
+   "source": [
+    "gop_community_weight = pd.DataFrame(gop_community_pairs.groupby(['name', 'target', 'source']).size().reset_index())\n",
+    "gop_community_weight = gop_community_weight.rename(columns={0: 'weight'}).reset_index(drop=True)\n",
+    "gop_community_weight = gop_community_weight.sort_values(by='weight', ascending=False).reset_index(drop=True)"
+   ]
+  },
+  {
+   "cell_type": "markdown",
+   "metadata": {},
+   "source": [
+    "Step 7: Sort sources by weight to identify the top 50 most influential sources "
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": 66,
+   "metadata": {},
+   "outputs": [
+    {
+     "data": {
+      "text/html": [
+       "<div>\n",
+       "<style scoped>\n",
+       "    .dataframe tbody tr th:only-of-type {\n",
+       "        vertical-align: middle;\n",
+       "    }\n",
+       "\n",
+       "    .dataframe tbody tr th {\n",
+       "        vertical-align: top;\n",
+       "    }\n",
+       "\n",
+       "    .dataframe thead th {\n",
+       "        text-align: right;\n",
+       "    }\n",
+       "</style>\n",
+       "<table border=\"1\" class=\"dataframe\">\n",
+       "  <thead>\n",
+       "    <tr style=\"text-align: right;\">\n",
+       "      <th></th>\n",
+       "      <th>source</th>\n",
+       "      <th>weight</th>\n",
+       "    </tr>\n",
+       "  </thead>\n",
+       "  <tbody>\n",
+       "    <tr>\n",
+       "      <th>0</th>\n",
+       "      <td>RealAmericasVoice</td>\n",
+       "      <td>43</td>\n",
+       "    </tr>\n",
+       "    <tr>\n",
+       "      <th>1</th>\n",
+       "      <td>newsmax</td>\n",
+       "      <td>43</td>\n",
+       "    </tr>\n",
+       "    <tr>\n",
+       "      <th>2</th>\n",
+       "      <td>DonaldJTrumpJr</td>\n",
+       "      <td>31</td>\n",
+       "    </tr>\n",
+       "    <tr>\n",
+       "      <th>3</th>\n",
+       "      <td>MarjorieTaylorGreene</td>\n",
+       "      <td>27</td>\n",
+       "    </tr>\n",
+       "    <tr>\n",
+       "      <th>4</th>\n",
+       "      <td>Breitbart</td>\n",
+       "      <td>24</td>\n",
+       "    </tr>\n",
+       "    <tr>\n",
+       "      <th>5</th>\n",
+       "      <td>Conservativity</td>\n",
+       "      <td>24</td>\n",
+       "    </tr>\n",
+       "    <tr>\n",
+       "      <th>6</th>\n",
+       "      <td>DMLNewsApp</td>\n",
+       "      <td>24</td>\n",
+       "    </tr>\n",
+       "    <tr>\n",
+       "      <th>7</th>\n",
+       "      <td>bennyjohnson</td>\n",
+       "      <td>23</td>\n",
+       "    </tr>\n",
+       "    <tr>\n",
+       "      <th>8</th>\n",
+       "      <td>dan.bongino</td>\n",
+       "      <td>23</td>\n",
+       "    </tr>\n",
+       "    <tr>\n",
+       "      <th>9</th>\n",
+       "      <td>FoxNews</td>\n",
+       "      <td>22</td>\n",
+       "    </tr>\n",
+       "    <tr>\n",
+       "      <th>10</th>\n",
+       "      <td>terrencekwilliams</td>\n",
+       "      <td>20</td>\n",
+       "    </tr>\n",
+       "    <tr>\n",
+       "      <th>11</th>\n",
+       "      <td>141991342558232</td>\n",
+       "      <td>20</td>\n",
+       "    </tr>\n",
+       "    <tr>\n",
+       "      <th>12</th>\n",
+       "      <td>DSouzaDinesh</td>\n",
+       "      <td>19</td>\n",
+       "    </tr>\n",
+       "    <tr>\n",
+       "      <th>13</th>\n",
+       "      <td>turningpointusa</td>\n",
+       "      <td>19</td>\n",
+       "    </tr>\n",
+       "    <tr>\n",
+       "      <th>14</th>\n",
+       "      <td>rsbnetwork</td>\n",
+       "      <td>18</td>\n",
+       "    </tr>\n",
+       "    <tr>\n",
+       "      <th>15</th>\n",
+       "      <td>judgejeaninepirro</td>\n",
+       "      <td>17</td>\n",
+       "    </tr>\n",
+       "    <tr>\n",
+       "      <th>16</th>\n",
+       "      <td>realstudentsfortrump</td>\n",
+       "      <td>17</td>\n",
+       "    </tr>\n",
+       "    <tr>\n",
+       "      <th>17</th>\n",
+       "      <td>thesweetlewspecial</td>\n",
+       "      <td>17</td>\n",
+       "    </tr>\n",
+       "    <tr>\n",
+       "      <th>18</th>\n",
+       "      <td>123192635089</td>\n",
+       "      <td>17</td>\n",
+       "    </tr>\n",
+       "    <tr>\n",
+       "      <th>19</th>\n",
+       "      <td>Americanvoicesthedailycaller</td>\n",
+       "      <td>16</td>\n",
+       "    </tr>\n",
+       "    <tr>\n",
+       "      <th>20</th>\n",
+       "      <td>GOP</td>\n",
+       "      <td>14</td>\n",
+       "    </tr>\n",
+       "    <tr>\n",
+       "      <th>21</th>\n",
+       "      <td>JaySekulow</td>\n",
+       "      <td>14</td>\n",
+       "    </tr>\n",
+       "    <tr>\n",
+       "      <th>22</th>\n",
+       "      <td>youngamericasfoundation</td>\n",
+       "      <td>14</td>\n",
+       "    </tr>\n",
+       "    <tr>\n",
+       "      <th>23</th>\n",
+       "      <td>officialbenshapiro</td>\n",
+       "      <td>14</td>\n",
+       "    </tr>\n",
+       "    <tr>\n",
+       "      <th>24</th>\n",
+       "      <td>themarkkaye</td>\n",
+       "      <td>14</td>\n",
+       "    </tr>\n",
+       "    <tr>\n",
+       "      <th>25</th>\n",
+       "      <td>events</td>\n",
+       "      <td>13</td>\n",
+       "    </tr>\n",
+       "    <tr>\n",
+       "      <th>26</th>\n",
+       "      <td>realCharlieKirk</td>\n",
+       "      <td>11</td>\n",
+       "    </tr>\n",
+       "    <tr>\n",
+       "      <th>27</th>\n",
+       "      <td>1167467090082059</td>\n",
+       "      <td>11</td>\n",
+       "    </tr>\n",
+       "    <tr>\n",
+       "      <th>28</th>\n",
+       "      <td>kirkcameron</td>\n",
+       "      <td>10</td>\n",
+       "    </tr>\n",
+       "    <tr>\n",
+       "      <th>29</th>\n",
+       "      <td>PatriotPost</td>\n",
+       "      <td>9</td>\n",
+       "    </tr>\n",
+       "    <tr>\n",
+       "      <th>30</th>\n",
+       "      <td>OscarElBlue</td>\n",
+       "      <td>9</td>\n",
+       "    </tr>\n",
+       "    <tr>\n",
+       "      <th>31</th>\n",
+       "      <td>RSC.GOP</td>\n",
+       "      <td>8</td>\n",
+       "    </tr>\n",
+       "    <tr>\n",
+       "      <th>32</th>\n",
+       "      <td>51052893175</td>\n",
+       "      <td>8</td>\n",
+       "    </tr>\n",
+       "    <tr>\n",
+       "      <th>33</th>\n",
+       "      <td>yaliberty</td>\n",
+       "      <td>8</td>\n",
+       "    </tr>\n",
+       "    <tr>\n",
+       "      <th>34</th>\n",
+       "      <td>mayrafloresforcongress</td>\n",
+       "      <td>8</td>\n",
+       "    </tr>\n",
+       "    <tr>\n",
+       "      <th>35</th>\n",
+       "      <td>RepKevinMcCarthy</td>\n",
+       "      <td>8</td>\n",
+       "    </tr>\n",
+       "    <tr>\n",
+       "      <th>36</th>\n",
+       "      <td>DailyCaller</td>\n",
+       "      <td>8</td>\n",
+       "    </tr>\n",
+       "    <tr>\n",
+       "      <th>37</th>\n",
+       "      <td>DrScottJensen</td>\n",
+       "      <td>7</td>\n",
+       "    </tr>\n",
+       "    <tr>\n",
+       "      <th>38</th>\n",
+       "      <td>ben.stolen.7906</td>\n",
+       "      <td>7</td>\n",
+       "    </tr>\n",
+       "    <tr>\n",
+       "      <th>39</th>\n",
+       "      <td>TheFirstonTV</td>\n",
+       "      <td>7</td>\n",
+       "    </tr>\n",
+       "    <tr>\n",
+       "      <th>40</th>\n",
+       "      <td>111677527294728</td>\n",
+       "      <td>7</td>\n",
+       "    </tr>\n",
+       "    <tr>\n",
+       "      <th>41</th>\n",
+       "      <td>BlazeMedia</td>\n",
+       "      <td>7</td>\n",
+       "    </tr>\n",
+       "    <tr>\n",
+       "      <th>42</th>\n",
+       "      <td>GlennBeck</td>\n",
+       "      <td>7</td>\n",
+       "    </tr>\n",
+       "    <tr>\n",
+       "      <th>43</th>\n",
+       "      <td>DavidJHarrisJr</td>\n",
+       "      <td>7</td>\n",
+       "    </tr>\n",
+       "    <tr>\n",
+       "      <th>44</th>\n",
+       "      <td>joseagustin.fernandezaramburugonzalez</td>\n",
+       "      <td>7</td>\n",
+       "    </tr>\n",
+       "    <tr>\n",
+       "      <th>45</th>\n",
+       "      <td>414280728767306</td>\n",
+       "      <td>7</td>\n",
+       "    </tr>\n",
+       "    <tr>\n",
+       "      <th>46</th>\n",
+       "      <td>100062205951846</td>\n",
+       "      <td>7</td>\n",
+       "    </tr>\n",
+       "    <tr>\n",
+       "      <th>47</th>\n",
+       "      <td>400138283655842</td>\n",
+       "      <td>7</td>\n",
+       "    </tr>\n",
+       "    <tr>\n",
+       "      <th>48</th>\n",
+       "      <td>SinMiedoRadio</td>\n",
+       "      <td>7</td>\n",
+       "    </tr>\n",
+       "    <tr>\n",
+       "      <th>49</th>\n",
+       "      <td>scott.thurmer.3</td>\n",
+       "      <td>6</td>\n",
+       "    </tr>\n",
+       "  </tbody>\n",
+       "</table>\n",
+       "</div>"
+      ],
+      "text/plain": [
+       "                                   source  weight\n",
+       "0                       RealAmericasVoice      43\n",
+       "1                                 newsmax      43\n",
+       "2                          DonaldJTrumpJr      31\n",
+       "3                    MarjorieTaylorGreene      27\n",
+       "4                               Breitbart      24\n",
+       "5                          Conservativity      24\n",
+       "6                              DMLNewsApp      24\n",
+       "7                            bennyjohnson      23\n",
+       "8                             dan.bongino      23\n",
+       "9                                 FoxNews      22\n",
+       "10                      terrencekwilliams      20\n",
+       "11                        141991342558232      20\n",
+       "12                           DSouzaDinesh      19\n",
+       "13                        turningpointusa      19\n",
+       "14                             rsbnetwork      18\n",
+       "15                      judgejeaninepirro      17\n",
+       "16                   realstudentsfortrump      17\n",
+       "17                     thesweetlewspecial      17\n",
+       "18                           123192635089      17\n",
+       "19           Americanvoicesthedailycaller      16\n",
+       "20                                    GOP      14\n",
+       "21                             JaySekulow      14\n",
+       "22                youngamericasfoundation      14\n",
+       "23                     officialbenshapiro      14\n",
+       "24                            themarkkaye      14\n",
+       "25                                 events      13\n",
+       "26                        realCharlieKirk      11\n",
+       "27                       1167467090082059      11\n",
+       "28                            kirkcameron      10\n",
+       "29                            PatriotPost       9\n",
+       "30                            OscarElBlue       9\n",
+       "31                                RSC.GOP       8\n",
+       "32                            51052893175       8\n",
+       "33                              yaliberty       8\n",
+       "34                 mayrafloresforcongress       8\n",
+       "35                       RepKevinMcCarthy       8\n",
+       "36                            DailyCaller       8\n",
+       "37                          DrScottJensen       7\n",
+       "38                        ben.stolen.7906       7\n",
+       "39                           TheFirstonTV       7\n",
+       "40                        111677527294728       7\n",
+       "41                             BlazeMedia       7\n",
+       "42                              GlennBeck       7\n",
+       "43                         DavidJHarrisJr       7\n",
+       "44  joseagustin.fernandezaramburugonzalez       7\n",
+       "45                        414280728767306       7\n",
+       "46                        100062205951846       7\n",
+       "47                        400138283655842       7\n",
+       "48                          SinMiedoRadio       7\n",
+       "49                        scott.thurmer.3       6"
+      ]
+     },
+     "execution_count": 66,
+     "metadata": {},
+     "output_type": "execute_result"
+    }
+   ],
+   "source": [
+    "gop_community_influencers = gop_community_weight.groupby('source').sum().sort_values(by='weight', ascending=False).head(50)\n",
+    "gop_community_influencers = pd.DataFrame(gop_community_influencers).reset_index()\n",
+    "gop_community_influencers"
+   ]
+  },
+  {
+   "cell_type": "markdown",
+   "metadata": {},
+   "source": [
+    "That's it! \n",
+    "\n",
+    "Now it's ripe for visualization purposes (e.g. a very basic graph):"
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": 71,
+   "metadata": {},
+   "outputs": [
+    {
+     "data": {
+      "text/plain": [
+       "<matplotlib.legend.Legend at 0x7f9231af3610>"
+      ]
+     },
+     "execution_count": 71,
+     "metadata": {},
+     "output_type": "execute_result"
+    },
+    {
+     "data": {
+      "image/png": "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\n",
+      "text/plain": [
+       "<Figure size 432x288 with 1 Axes>"
+      ]
+     },
+     "metadata": {
+      "needs_background": "light"
+     },
+     "output_type": "display_data"
+    }
+   ],
+   "source": [
+    "fig, ax = plt.subplots()\n",
+    "top_20 = gop_community_influencers.head(20)\n",
+    "top_20.plot.barh(x='source', y='weight', color='r', ax=ax).invert_yaxis()\n",
+    "ax.legend([\"weight\"])"
+   ]
+  },
+  {
+   "cell_type": "markdown",
+   "metadata": {},
+   "source": [
+    "And you could now store this data in a database (appending a new column that includes the specific date it was collected) or export it to a CSV file to enable longitudinal analysis week over week.\n",
+    "\n",
+    "BONUS: \n",
+    "\n",
+    "If you wanted to track actual content shared by these influential sources on a regular basis, you could prep it for batch upload:"
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": 67,
+   "metadata": {},
+   "outputs": [],
+   "source": [
+    "def prep_batch_influencers(data, listname):\n",
+    "    data['List'] = listname\n",
+    "    data['source'] = data['source'].astype(str)\n",
+    "    data['Page or Account URL'] = \"https://www.facebook.com/\" + data['source']\n",
+    "    data = data[['Page or Account URL', 'List']] \n",
+    "    return data\n",
+    "\n",
+    "influential_pages = prep_batch_influencers(gop_community_influencers, listname='GOP Influential Pages')\n",
+    "influential_pages.to_csv(\"influential pages.csv\", index=False)"
+   ]
+  }
+ ],
+ "metadata": {
+  "kernelspec": {
+   "display_name": "Python 3",
+   "language": "python",
+   "name": "python3"
+  },
+  "language_info": {
+   "codemirror_mode": {
+    "name": "ipython",
+    "version": 3
+   },
+   "file_extension": ".py",
+   "mimetype": "text/x-python",
+   "name": "python",
+   "nbconvert_exporter": "python",
+   "pygments_lexer": "ipython3",
+   "version": "3.8.3"
+  }
+ },
+ "nbformat": 4,
+ "nbformat_minor": 4
+}
