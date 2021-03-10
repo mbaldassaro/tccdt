@@ -34,12 +34,10 @@
     "import matplotlib.pyplot as plt\n",
     "\n",
     "#crowdtangle token:\n",
-    "token = 'S3Bhx2kk4yZaiFKsW19PwlT04kW9azGHBPaI1g6s' #garunoff\n",
-    "#token = 'your_dashboard_token'\n",
+    "token = 'your_dashboard_token'\n",
     "\n",
     "#database connection:\n",
-    "connection_string = \"mssql+pyodbc://svradmin:+EnVgh2q-zxump9T@digitalthreats.database.windows.net:1433/garunoff?driver=ODBC+Driver+17+for+SQL+Server\"\n",
-    "#connection_string = 'your_database_connection_string'\n",
+    "connection_string = 'your_database_connection_string'\n",
     "engine = create_engine(connection_string, encoding='utf8')\n",
     "db = engine.connect()"
    ]
